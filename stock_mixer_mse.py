@@ -3,9 +3,11 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
-
-X_train = np.load("data/X_train.npy")
-y_train = np.load("data/y_train.npy")
+# =====================================================
+# 1. Загрузка данных из готовых .npy (как в MLP/LSTM)
+# =====================================================
+X_train = np.load("data/X_train.npy")  # shape: (N_train, 10)
+y_train = np.load("data/y_train.npy")  # shape: (N_train,)
 X_val   = np.load("data/X_val.npy")
 y_val   = np.load("data/y_val.npy")
 X_test  = np.load("data/X_test.npy")
@@ -13,15 +15,26 @@ y_test  = np.load("data/y_test.npy")
 
 print("Shapes:")
 print("X_train:", X_train.shape, "y_train:", y_train.shape)
-print("X_val:  ", X_val.shape, "y_val:  ", y_val.shape)
-print("X_test: ", X_test.shape, "y_test:", y_test.shape)
+print("X_val:  ", X_val.shape,   "y_val:  ", y_val.shape)
+print("X_test: ", X_test.shape,  "y_test:", y_test.shape)
+
+seq_len = X_train.shape[1]   # у тебя 10 лагов
+n_features = 1               # один признак на шаге времени: ret_lag_t
 
 
+# =====================================================
+# 2. Dataset: превращаем (N, 10) → (N, 10, 1)
+# =====================================================
 
-class NumpyDataset(Dataset):
+class SequenceDataset(Dataset):
+    """
+    Каждый объект = одна временная последовательность длины seq_len
+    X: (seq_len, n_features), y: скалярный таргет (доходность следующего дня)
+    """
     def __init__(self, X, y):
-        # X: (N, 10) -> (N, 10, 1)
+        # X: (N, seq_len) → (N, seq_len, 1)
         self.X = torch.from_numpy(X).float().unsqueeze(-1)
+        # y: (N,) → (N, 1)
         self.y = torch.from_numpy(y).float().view(-1, 1)
 
     def __len__(self):
@@ -31,132 +44,187 @@ class NumpyDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-train_ds = NumpyDataset(X_train, y_train)
-val_ds   = NumpyDataset(X_val, y_val)
-test_ds  = NumpyDataset(X_test, y_test)
+train_ds = SequenceDataset(X_train, y_train)
+val_ds   = SequenceDataset(X_val,   y_val)
+test_ds  = SequenceDataset(X_test,  y_test)
 
-train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-val_loader   = DataLoader(val_ds, batch_size=256, shuffle=False)
-test_loader  = DataLoader(test_ds, batch_size=256, shuffle=False)
+train_loader = DataLoader(train_ds, batch_size=256, shuffle=True)
+val_loader   = DataLoader(val_ds,   batch_size=512, shuffle=False)
+test_loader  = DataLoader(test_ds,  batch_size=512, shuffle=False)
 
 
-input_dim = X_train.shape[1]
+# =====================================================
+# 3. StockMixer-подобный блок
+#    (MLP по времени + MLP по признакам с residual)
+# =====================================================
 
 class StockMixerBlock(nn.Module):
-    def __init__(self, n_stocks, seq_len, hidden_dim, mlp_ratio=4):
-        super().__init__()
-
-        # 1) Indicator mixing: по последней оси D (hidden_dim)
-        self.mlp_ind = nn.Sequential(
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, hidden_dim * mlp_ratio),
-            nn.GELU(),
-            nn.Linear(hidden_dim * mlp_ratio, hidden_dim),
-        )
-
-        # 2) Temporal mixing: по оси T (seq_len)
-        self.mlp_time = nn.Sequential(
-            nn.LayerNorm(seq_len),
-            nn.Linear(seq_len, seq_len * mlp_ratio),
-            nn.GELU(),
-            nn.Linear(seq_len * mlp_ratio, seq_len),
-        )
-
-        # 3) Stock mixing: по оси N (n_stocks)
-        self.mlp_stock = nn.Sequential(
-            nn.LayerNorm(n_stocks),
-            nn.Linear(n_stocks, n_stocks * mlp_ratio),
-            nn.GELU(),
-            nn.Linear(n_stocks * mlp_ratio, n_stocks),
-        )
-
-    def forward(self, x):
-        # x: [B, N, T, D]
-
-        # 1) Indicator mixing (по признакам)
-        x = x + self.mlp_ind(x)  # [B, N, T, D]
-
-        # 2) Temporal mixing (по времени)
-        y = x.permute(0, 1, 3, 2)   # [B, N, D, T]
-        y = self.mlp_time(y)        # последняя ось = T
-        x = x + y.permute(0, 1, 3, 2)  # обратно [B, N, T, D]
-
-        # 3) Stock mixing (по акциям)
-        z = x.permute(0, 2, 3, 1)   # [B, T, D, N]
-        z = self.mlp_stock(z)       # последняя ось = N
-        x = x + z.permute(0, 3, 1, 2)  # обратно [B, N, T, D]
-
-        return x
-
-
-class StockMixer(nn.Module):
     """
-    Упрощённая StockMixer-архитектура для твоего случая:
-    - вход: вектор 10 лагов (B, 10)
-    - сначала поднимаем его до (B, 10, d_model)
-    - несколько Mixer-block'ов
-    - затем глобальный readout и выход 1 скаляр (доходность)
+    Блок mixer-а:
+      1) Time-mixing: MLP вдоль оси времени (T)
+      2) Feature-mixing: MLP вдоль оси признаков (D = d_model)
+
+    Вход/выход: x формы (B, T, D)
     """
-    def __init__(self,
-                 seq_len: int = 10,
-                 d_model: int = 32,
-                 num_layers: int = 4,
-                 expansion_factor: int = 2,
-                 dropout: float = 0.1):
+    def __init__(
+        self,
+        seq_len: int,
+        d_model: int,
+        expansion_factor_time: float = 2.0,
+        expansion_factor_feature: float = 2.0,
+        dropout: float = 0.0,
+    ):
         super().__init__()
         self.seq_len = seq_len
         self.d_model = d_model
 
-        # У тебя фактически 1 "признак" (ret), поэтому:
-        # вход (B, T) -> (B, T, 1) -> Linear(1 -> d_model)
-        self.input_proj = nn.Linear(1, d_model)
+        hidden_time = int(seq_len * expansion_factor_time)
+        hidden_feat = int(d_model * expansion_factor_feature)
 
+        # Нормализации по последней оси (D)
+        self.norm_time = nn.LayerNorm(d_model)
+        self.norm_feat = nn.LayerNorm(d_model)
+
+        # MLP по времени: линейный слой вдоль оси T
+        # Будем работать с тензором формы (B * D, T)
+        self.time_mlp = nn.Sequential(
+            nn.Linear(seq_len, hidden_time),
+            nn.GELU(),
+            nn.Linear(hidden_time, seq_len),
+            nn.Dropout(dropout),
+        )
+
+        # MLP по признакам: линейный слой вдоль оси D
+        # Будем работать с тензором формы (B * T, D)
+        self.feature_mlp = nn.Sequential(
+            nn.Linear(d_model, hidden_feat),
+            nn.GELU(),
+            nn.Linear(hidden_feat, d_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, T, D)
+        """
+        B, T, D = x.shape
+        assert T == self.seq_len, f"ожидали T={self.seq_len}, получили {T}"
+        assert D == self.d_model, f"ожидали D={self.d_model}, получили {D}"
+
+        # ---- 1. Time mixing ----
+        # нормализация по признакам
+        y = self.norm_time(x)                 # (B, T, D)
+        # переносим оси: (B, T, D) → (B, D, T)
+        y = y.transpose(1, 2)                 # (B, D, T)
+        # схлопываем B и D
+        y = y.reshape(B * D, T)               # (B*D, T)
+        # MLP по времени
+        y = self.time_mlp(y)                  # (B*D, T)
+        # разворачиваем обратно
+        y = y.reshape(B, D, T).transpose(1, 2)  # (B, T, D)
+        # residual
+        x = x + y
+
+        # ---- 2. Feature mixing ----
+        z = self.norm_feat(x)                 # (B, T, D)
+        z = z.reshape(B * T, D)               # (B*T, D)
+        z = self.feature_mlp(z)               # (B*T, D)
+        z = z.reshape(B, T, D)                # (B, T, D)
+        x = x + z
+
+        return x
+
+
+# =====================================================
+# 4. Полная модель StockMixer
+# =====================================================
+
+class StockMixer(nn.Module):
+    """
+    Упрощённая реализация StockMixer:
+      - линейная проекция признаков в d_model
+      - несколько StockMixerBlock
+      - LayerNorm
+      - голова, которая берёт последний временной шаг и предсказывает r_t
+    """
+    def __init__(
+        self,
+        seq_len: int,
+        n_features: int,
+        d_model: int = 64,
+        num_layers: int = 4,
+        expansion_factor_time: float = 2.0,
+        expansion_factor_feature: float = 2.0,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.seq_len = seq_len
+        self.n_features = n_features
+        self.d_model = d_model
+
+        # Входная проекция: (features → d_model)
+        self.input_proj = nn.Linear(n_features, d_model)
+
+        # Стек mixer-блоков
         self.blocks = nn.ModuleList([
-            StockMixerBlock(seq_len, d_model,
-                            expansion_factor=expansion_factor,
-                            dropout=dropout)
+            StockMixerBlock(
+                seq_len=seq_len,
+                d_model=d_model,
+                expansion_factor_time=expansion_factor_time,
+                expansion_factor_feature=expansion_factor_feature,
+                dropout=dropout,
+            )
             for _ in range(num_layers)
         ])
 
-        self.norm_out = nn.LayerNorm(d_model)
-        # Можно сделать readout как flatten(T * D) -> 1
-        self.head = nn.Linear(seq_len * d_model, 1)
+        self.final_norm = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, 1)  # предсказываем r_t
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        x: (B, seq_len) = (B, 10)
+        x: (B, T, n_features) → (B, 1)
         """
-        # (B, T) -> (B, T, 1)
-        x = x.unsqueeze(-1)
-        # (B, T, 1) -> (B, T, d_model)
+        # (B, T, F) → (B, T, D)
         x = self.input_proj(x)
 
-        # Mixer-блоки
+        # пропускаем через mixer-блоки
         for block in self.blocks:
-            x = block(x)
+            x = block(x)    # (B, T, D)
 
-        # Нормализация + readout
-        x = self.norm_out(x)
-        x = x.reshape(x.size(0), -1)   # (B, T*d_model)
-        out = self.head(x)             # (B, 1)
+        x = self.final_norm(x)  # (B, T, D)
+
+        # берём последнюю точку по времени
+        last = x[:, -1, :]      # (B, D)
+        out = self.head(last)   # (B, 1)
         return out
 
 
+# =====================================================
+# 5. Обучение и оценка
+# =====================================================
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
 
 model = StockMixer(
-    seq_len = X_train.shape[1],  # должно быть 10
-    d_model = 32,                # можешь поиграть: 32 / 64
-    num_layers = 4,
-    expansion_factor = 2,
-    dropout = 0.1
+    seq_len=seq_len,
+    n_features=n_features,
+    d_model=64,
+    num_layers=4,
+    expansion_factor_time=2.0,
+    expansion_factor_feature=2.0,
+    dropout=0.1,
 ).to(device)
+
 criterion_mse = nn.MSELoss()
 criterion_mae = nn.L1Loss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
 
 def run_epoch(dataloader, model, optimizer=None):
+    """
+    Одна эпоха: если optimizer is None → eval, иначе → train
+    """
     if optimizer is None:
         model.eval()
     else:
@@ -166,13 +234,13 @@ def run_epoch(dataloader, model, optimizer=None):
     n_samples = 0
 
     for X_batch, y_batch in dataloader:
-        X_batch = X_batch.to(device)
-        y_batch = y_batch.to(device)
+        X_batch = X_batch.to(device)  # (B, T, 1)
+        y_batch = y_batch.to(device)  # (B, 1)
 
         if optimizer is not None:
             optimizer.zero_grad()
 
-        preds = model(X_batch)
+        preds = model(X_batch)       # (B, 1)
         loss = criterion_mse(preds, y_batch)
 
         if optimizer is not None:
@@ -185,6 +253,8 @@ def run_epoch(dataloader, model, optimizer=None):
 
     return total_loss / n_samples
 
+
+# ---- цикл обучения ----
 
 n_epochs = 50
 best_val_loss = float("inf")
@@ -201,10 +271,14 @@ for epoch in range(1, n_epochs + 1):
     if epoch % 5 == 0 or epoch == 1:
         print(f"Epoch {epoch:3d} | train MSE: {train_loss:.6e} | val MSE: {val_loss:.6e}")
 
-
+# загружаем лучшую по валидации модель
 model.load_state_dict(best_state_dict)
 print("Best val MSE:", best_val_loss)
 
+
+# =====================================================
+# 6. Оценка: MSE/MAE + Sharpe/Sortino
+# =====================================================
 
 def evaluate(dataloader, model):
     model.eval()
@@ -219,23 +293,24 @@ def evaluate(dataloader, model):
             preds = model(X_batch)
 
             mse = criterion_mse(preds, y_batch)
-
+            mae = criterion_mae(preds, y_batch)
 
             batch_size = X_batch.size(0)
             mse_total += mse.item() * batch_size
-
+            mae_total += mae.item() * batch_size
             n_samples += batch_size
 
-    return mse_total / n_samples
+    return mse_total / n_samples, mae_total / n_samples
 
-train_mse = evaluate(train_loader, model)
-val_mse   = evaluate(val_loader, model)
-test_mse  = evaluate(test_loader, model)
+
+train_mse, train_mae = evaluate(train_loader, model)
+val_mse,   val_mae   = evaluate(val_loader, model)
+test_mse,  test_mae  = evaluate(test_loader, model)
 
 print("\nFinal metrics:")
-print(f"Train: MSE={train_mse:.6e}")
-print(f"Val:   MSE={val_mse:.6e}")
-print(f"Test:  MSE={test_mse:.6e}")
+print(f"Train: MSE={train_mse:.6e}, MAE={train_mae:.6e}")
+print(f"Val:   MSE={val_mse:.6e}, MAE={val_mae:.6e}")
+print(f"Test:  MSE={test_mse:.6e}, MAE={test_mae:.6e}")
 
 
 def get_predictions(dataloader, model):
@@ -254,9 +329,10 @@ def get_predictions(dataloader, model):
     y_all = np.concatenate(y_list)
     return preds_all, y_all
 
+
 y_pred_test, y_true_test = get_predictions(test_loader, model)
 
-
+# простая стратегия: если прогноз > 0 -> long, иначе 0
 signal = (y_pred_test > 0).astype(float)
 strategy_ret = signal * y_true_test
 
@@ -277,7 +353,7 @@ if std_ret > 0:
 else:
     print("Std = 0, Sharpe не определён.")
 
-# Pokuta za minusive dni
+# Sortino
 downside = strategy_ret[strategy_ret < 0]
 if len(downside) > 0:
     downside_std = downside.std(ddof=1)
@@ -286,8 +362,9 @@ if len(downside) > 0:
     print("Sortino daily:", sortino_daily)
     print("Sortino annual:", sortino_annual)
 else:
-    print("No minud days")
+    print("Нет отрицательных дней => Sortino формально бесконечен.")
 
+# Baseline: Buy & Hold на тех же днях теста
 bh_ret = y_true_test
 
 bh_mean = bh_ret.mean()
@@ -302,4 +379,4 @@ if bh_std > 0:
     bh_sharpe_annual = bh_sharpe_daily * math.sqrt(252)
     print("Buy & Hold Sharpe annual:", bh_sharpe_annual)
 else:
-    print("Buy & Hold: Std = 0, Sharpe is not counted")
+    print("Buy & Hold: Std = 0, Sharpe не определён.")
