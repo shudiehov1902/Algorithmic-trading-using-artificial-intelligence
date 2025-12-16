@@ -20,7 +20,8 @@ print("X_test: ", X_test.shape, "y_test:", y_test.shape)
 
 class NumpyDataset(Dataset):
     def __init__(self, X, y):
-        self.X = torch.from_numpy(X).float()
+        # X: (N, 10) -> (N, 10, 1)
+        self.X = torch.from_numpy(X).float().unsqueeze(-1)
         self.y = torch.from_numpy(y).float().view(-1, 1)
 
     def __len__(self):
@@ -28,6 +29,7 @@ class NumpyDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
+
 
 train_ds = NumpyDataset(X_train, y_train)
 val_ds   = NumpyDataset(X_val, y_val)
@@ -40,24 +42,27 @@ test_loader  = DataLoader(test_ds, batch_size=256, shuffle=False)
 
 input_dim = X_train.shape[1]
 
-class MLP(nn.Module):
-    def __init__(self, input_dim):
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=1, hidden_size=32, num_layers=1):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)   # предсказываем одну величину — доходность
+        self.lstm = nn.LSTM(
+            input_size=input_size,   # сколько фич на каждом шаге (у нас 1)
+            hidden_size=hidden_size, # размер скрытого состояния
+            num_layers=num_layers,
+            batch_first=True         # вход: (batch, seq_len, input_size)
         )
+        self.fc = nn.Linear(hidden_size, 1)  # из скрытого состояния -> предсказание доходности
 
     def forward(self, x):
-        return self.net(x)
+        # x: (batch, seq_len, input_size) = (batch, 10, 1)
+        out, (h_n, c_n) = self.lstm(x)   # out: (batch, seq_len, hidden_size)
+        last_hidden = out[:, -1, :]      # берём последнее время (последний день)
+        out = self.fc(last_hidden)       # (batch, 1)
+        return out
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
 
-model = MLP(input_dim).to(device)
+model = LSTMModel(input_size=1, hidden_size=32, num_layers=1).to(device)
 
 criterion_mse = nn.MSELoss()
 criterion_mae = nn.L1Loss()

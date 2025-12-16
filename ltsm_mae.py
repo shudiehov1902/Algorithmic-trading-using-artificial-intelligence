@@ -17,10 +17,10 @@ print("X_val:  ", X_val.shape, "y_val:  ", y_val.shape)
 print("X_test: ", X_test.shape, "y_test:", y_test.shape)
 
 
-
 class NumpyDataset(Dataset):
     def __init__(self, X, y):
-        self.X = torch.from_numpy(X).float()
+        # X: (N, 10) -> (N, 10, 1)
+        self.X = torch.from_numpy(X).float().unsqueeze(-1)
         self.y = torch.from_numpy(y).float().view(-1, 1)
 
     def __len__(self):
@@ -40,24 +40,33 @@ test_loader  = DataLoader(test_ds, batch_size=256, shuffle=False)
 
 input_dim = X_train.shape[1]
 
-class MLP(nn.Module):
-    def __init__(self, input_dim):
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=1, hidden_size=32, num_layers=1):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)   # предсказываем одну величину — доходность
+        self.lstm = nn.LSTM(
+            input_size=input_size,   # сколько фич на каждом шаге (у нас 1)
+            hidden_size=hidden_size, # размер скрытого состояния
+            num_layers=num_layers,
+            batch_first=True         # вход: (batch, seq_len, input_size)
         )
+        self.fc = nn.Linear(hidden_size, 1)  # из скрытого состояния -> предсказание доходности
 
     def forward(self, x):
-        return self.net(x)
+        # x: (batch, seq_len, input_size) = (batch, 10, 1)
+        out, (h_n, c_n) = self.lstm(x)   # out: (batch, seq_len, hidden_size)
+        last_hidden = out[:, -1, :]      # берём последнее время (последний день)
+        out = self.fc(last_hidden)       # (batch, 1)
+        return out
+
+
+
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
-model = MLP(input_dim).to(device)
+model = LSTMModel(input_size=1, hidden_size=32, num_layers=1).to(device)
+
 
 criterion_mse = nn.MSELoss()
 criterion_mae = nn.L1Loss()
@@ -81,7 +90,7 @@ def run_epoch(dataloader, model, optimizer=None):
             optimizer.zero_grad()
 
         preds = model(X_batch)
-        loss = criterion_mse(preds, y_batch)
+        loss = criterion_mae(preds, y_batch)
 
         if optimizer is not None:
             loss.backward()
@@ -107,11 +116,11 @@ for epoch in range(1, n_epochs + 1):
         best_state_dict = model.state_dict()
 
     if epoch % 5 == 0 or epoch == 1:
-        print(f"Epoch {epoch:3d} | train MSE: {train_loss:.6e} | val MSE: {val_loss:.6e}")
+        print(f"Epoch {epoch:3d} | train MAE: {train_loss:.6e} | val MAE: {val_loss:.6e}")
 
 
 model.load_state_dict(best_state_dict)
-print("Best val MSE:", best_val_loss)
+print("Best val MAE:", best_val_loss)
 
 
 def evaluate(dataloader, model):
@@ -126,24 +135,23 @@ def evaluate(dataloader, model):
             y_batch = y_batch.to(device)
             preds = model(X_batch)
 
-            mse = criterion_mse(preds, y_batch)
 
+            mae = criterion_mae(preds, y_batch)
 
             batch_size = X_batch.size(0)
-            mse_total += mse.item() * batch_size
-
+            mae_total += mae.item() * batch_size
             n_samples += batch_size
 
-    return mse_total / n_samples
+    return  mae_total / n_samples
 
-train_mse = evaluate(train_loader, model)
-val_mse   = evaluate(val_loader, model)
-test_mse  = evaluate(test_loader, model)
+train_mae = evaluate(train_loader, model)
+val_mae   = evaluate(val_loader, model)
+test_mae  = evaluate(test_loader, model)
 
 print("\nFinal metrics:")
-print(f"Train: MSE={train_mse:.6e}")
-print(f"Val:   MSE={val_mse:.6e}")
-print(f"Test:  MSE={test_mse:.6e}")
+print(f"Train:  MAE={train_mae:.6e}")
+print(f"Val:    MAE={val_mae:.6e}")
+print(f"Test:   MAE={test_mae:.6e}")
 
 
 def get_predictions(dataloader, model):
@@ -164,7 +172,7 @@ def get_predictions(dataloader, model):
 
 y_pred_test, y_true_test = get_predictions(test_loader, model)
 
-
+# ked mame viac ako 0 tak long inak 0
 signal = (y_pred_test > 0).astype(float)
 strategy_ret = signal * y_true_test
 
@@ -183,9 +191,9 @@ if std_ret > 0:
     print("Sharpe daily:", sharpe_daily)
     print("Sharpe annual:", sharpe_annual)
 else:
-    print("Std = 0, Sharpe не определён.")
+    print("Std = 0, Sharpe is not counted")
 
-# Pokuta za minusive dni
+
 downside = strategy_ret[strategy_ret < 0]
 if len(downside) > 0:
     downside_std = downside.std(ddof=1)
@@ -194,8 +202,10 @@ if len(downside) > 0:
     print("Sortino daily:", sortino_daily)
     print("Sortino annual:", sortino_annual)
 else:
-    print("No minud days")
+    print("No minus days")
 
+
+# Buy&Hold
 bh_ret = y_true_test
 
 bh_mean = bh_ret.mean()
@@ -210,4 +220,4 @@ if bh_std > 0:
     bh_sharpe_annual = bh_sharpe_daily * math.sqrt(252)
     print("Buy & Hold Sharpe annual:", bh_sharpe_annual)
 else:
-    print("Buy & Hold: Std = 0, Sharpe is not counted")
+    print("Buy & Hold: Std = 0, Sharpe  is not counted")

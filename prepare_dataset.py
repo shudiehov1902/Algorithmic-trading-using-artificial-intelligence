@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-DATA_DIR = "data"
+DATA_DIR = "/data/alpaca/alpaca_sp500_etf_2025_1day_open_filled"
 LAGS = 10
 
 

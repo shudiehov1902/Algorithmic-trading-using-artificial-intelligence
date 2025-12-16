@@ -1,0 +1,925 @@
+<!doctype html>
+<html lang="sk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prezentácia – Obchodovanie s AI: Sharpe/Sortino</title>
+  <meta name="description" content="Prezentácia bakalárskej práce: Obchodovanie s pomocou umelej inteligencie – Sharpe/Sortino ratio ako loss funkcia." />
+  <link rel="stylesheet" href="styles.css" />
+    <script
+            id="MathJax-script"
+            async
+            src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js">
+    </script>
+
+</head>
+<body>
+  <!-- Pevná horná lišta s názvom a rýchlou navigáciou -->
+  <header class="topbar" role="banner">
+    <div class="brand">
+      <span class="brand-title">Obchodovanie s AI</span>
+      <span class="brand-sub">Sharpe/Sortino ako loss</span>
+    </div>
+    <nav class="quicknav" aria-label="Rýchla navigácia">
+      <a href="#slide-1" title="Titulný slide">1</a>
+      <a href="#slide-2" title="Motivácia">2</a>
+      <a href="#slide-3" title="Cieľ práce">3</a>
+      <a href="#slide-4" title="Výnos a riziko">4</a>
+      <a href="#slide-5" title="Sharpe/Sortino">5</a>
+      <a href="#slide-6" title="Prečo nestačí MSE/MAE">6</a>
+      <a href="#slide-7" title="Dáta">7</a>
+      <a href="#slide-8" title="Predspracovanie">8</a>
+      <a href="#slide-9" title="Škálovanie">9</a>
+        <a href="#slide-9a" title="Implementácia – dátový pipeline">9a</a>
+        <a href="#slide-10" title="Model MLP">10</a>
+        <a href="#slide-10a" title="Implementácia – tréningový cyklus">10a</a>
+      <a href="#slide-11" title="Experiment 1">11</a>
+      <a href="#slide-12" title="Prečo multi-asset">12</a>
+      <a href="#slide-13" title="Experiment 2">13</a>
+      <a href="#slide-14" title="Experiment 2b">14</a>
+      <a href="#slide-15" title="Prechod na LSTM">15</a>
+      <a href="#slide-16" title="Architektúra LSTM">16</a>
+      <a href="#slide-17" title="Experiment 3">17</a>
+      <a href="#slide-18" title="Experiment 3b: LSTM + MSE">18</a>
+      <a href="#slide-19" title="Porovnanie">19</a>
+      <a href="#slide-20" title="Porovnanie tabuľka">20</a>
+      <a href="#slide-21" title="Body pod tabuľkou">21</a>
+      <a href="#slide-22" title="Zhrnutie">22</a>
+
+    </nav>
+  </header>
+
+  <!-- Telo s vertikálnym scroll-snap, každý slide je fullscreen sekcia -->
+  <main class="deck" role="main">
+    <!-- Slide 1 -->
+    <section class="slide hero" id="slide-1" aria-labelledby="s1-title">
+      <h1 id="s1-title">Obchodovanie s pomocou umelej inteligencie: Sharpe/Sortino ratio ako loss funkcia</h1>
+      <div class="tagline">STRATÉGIA RIADENÁ METRIKAMI RIZIKA A VÝNOSU</div>
+      <div class="subtitle">
+        <ul>
+          <li>Fakulta : <em>STU FEI</em></li>
+        </ul>
+      </div>
+      <div class="credits">Vladyslav Shudiehov<small>TRADING AI · BAKALÁRSKA PRÁCA</small></div>
+    </section>
+
+    <!-- Slide 2 -->
+    <section class="slide" id="slide-2" aria-labelledby="s2-title">
+      <h2 id="s2-title">Motivácia</h2>
+      <ul>
+        <li>Finančné trhy sú veľmi volatilné a ťažko predvídateľné.</li>
+        <li>V praxi sa čoraz viac používajú modely umelej inteligencie na obchodovanie.</li>
+        <li>Väčšina modelov optimalizuje <strong>štatistickú chybu</strong> (MSE, MAE), nie priamo <strong>finančný výkon</strong>.</li>
+        <li>Obchodníkov však zaujíma skôr:
+          <ul>
+            <li>dlhodobý výnos,</li>
+            <li>riziko,</li>
+            <li><strong>Sharpeho</strong> a <strong>Sortinov</strong> pomer.</li>
+          </ul>
+        </li>
+      </ul>
+      <p class="note">Poznámka: Chcem skúmať, či sa dá model učiť tak, aby sa zlepšovali finančné metriky, nie len štatistická chyba.</p>
+    </section>
+
+    <!-- Slide 3 -->
+    <section class="slide" id="slide-3" aria-labelledby="s3-title">
+      <h2 id="s3-title">Cieľ </h2>
+      <ul>
+        <li>Vybudovať a otestovať modely na predikciu denných výnosov akcií s použitím neurónových sietí.</li>
+        <li>Porovnať:
+          <ul>
+            <li>rôzne <strong>loss funkcie</strong> (MSE, MAE),</li>
+            <li>rôzne architektúry (<strong>MLP</strong>, <strong>LSTM</strong>).</li>
+          </ul>
+        </li>
+        <li>Vyhodnocovať modely z pohľadu:
+          <ul>
+            <li>štatistických metrík (MSE, MAE),</li>
+            <li><strong>Sharpeho</strong> a <strong>Sortinovho</strong> pomeru obchodnej stratégie.</li>
+          </ul>
+        </li>
+        <li>Pripraviť pôdu pre ďalší krok – <strong>Sharpe/Sortino ako loss funkcia</strong>.</li>
+      </ul>
+    </section>
+
+    <!-- Slide 4 -->
+    <section class="slide" id="slide-4" aria-labelledby="s4-title">
+      <h2 id="s4-title">Výnos a riziko</h2>
+      <ul>
+          <ul>
+              <li>Denný výnos akcie:</li>
+          </ul>
+
+          <div class="formula">
+              \( r_t = \dfrac{\text{close}_t - \text{close}_{t-1}}{\text{close}_{t-1}} \)
+          </div>
+        <li>Priemerný denný výnos = očakávaný zisk za deň.</li>
+        <li>Riziko reprezentujeme pomocou:
+          <ul>
+            <li>smerodajnej odchýlky výnosov (volatilita),</li>
+            <li>pre Sortino len <strong>záporné</strong> výnosy (downside risk).</li>
+          </ul>
+        </li>
+        <li>V obchodovaní je dôležitý <strong>pomer výnos / riziko</strong>, nie len samotný výnos.</li>
+      </ul>
+    </section>
+
+    <!-- Slide 5 -->
+      <section class="slide" id="slide-5" aria-labelledby="s5-title">
+          <h2 id="s5-title">Sharpeho a Sortinov pomer</h2>
+          <ul>
+              <li><strong>Sharpeho pomer</strong> (zjednodušene, bez bezrizikovej sadzby):</li>
+          </ul>
+
+          <div class="formula">
+              \( \text{Sharpe} = \dfrac{\mathbb{E}[r]}{\sigma(r)} \)
+          </div>
+
+          <ul>
+              <li><strong>Sortinov pomer</strong>:</li>
+          </ul>
+
+          <div class="formula">
+              \( \text{Sortino} = \dfrac{\mathbb{E}[r]}{\sigma(r_{r<0})} \)
+          </div>
+
+          <ul>
+              <li>Interpretácia:
+                  <ul>
+                      <li>\( \text{Sharpe} > 0 \) → stratégia zarába v prepočte na riziko,</li>
+                      <li>čím vyšší Sharpe/Sortino, tým lepší „risk-adjusted“ výkon.</li>
+                  </ul>
+              </li>
+              <li>V tejto práci hodnotím stratégie podľa <strong>anualizovaného</strong> Sharpeho a Sortina.</li>
+          </ul>
+      </section>
+
+
+      <!-- Slide 6 -->
+    <section class="slide" id="slide-6" aria-labelledby="s6-title">
+      <h2 id="s6-title">Prečo nestačí MSE / MAE</h2>
+      <ul>
+        <li>Bežné modely predikujú <strong>hodnotu výnosu</strong> a minimalizujú:
+          <ul>
+            <li><strong>MSE</strong> (Mean Squared Error),</li>
+            <li><strong>MAE</strong> (Mean Absolute Error).</li>
+          </ul>
+        </li>
+        <li>Tieto funkcie merajú:
+          <ul>
+            <li>priemernú štatistickú chybu predikcie,</li>
+            <li>neberú do úvahy riziko stratégie, asymetriu výnosov a transakčné rozhodnutia (long / flat).</li>
+          </ul>
+        </li>
+        <li>Cieľ ďalšej práce: skúmať loss funkcie, ktoré sú priamo založené na <strong>Sharpe/Sortino</strong>.</li>
+      </ul>
+    </section>
+
+    <!-- Slide 7 -->
+      <section class="slide" id="slide-7" aria-labelledby="s7-title">
+          <h2 id="s7-title">Dáta</h2>
+
+          <div class="slide-row">
+              <ul>
+                  <li>Zdroj: server fakulty, priečinok: <code>/data/alpaca/alpaca_sp500_etf_2025_1day_open_filled</code></li>
+                  <li>Denné dáta (1-day sviečky) pre:
+                      <ul>
+                          <li>akcie indexu <strong>S&amp;P 500</strong>,</li>
+                          <li>viaceré <strong>ETF</strong> (napr. SPY, QQQ, sektorové ETF).</li>
+                      </ul>
+                  </li>
+                  <li>Každý súbor <code>TICKER.csv</code> obsahuje: <code>open_date, open, high, low, close, volume_base</code>.</li>
+                  <li>Po spracovaní: <strong>542 tickerov</strong>, spolu ~<strong>1,29 milióna riadkov</strong>.</li>
+              </ul>
+
+              <img
+                      src="data.jpg"
+                      alt="DATA"
+                      class="slide-image-right"
+              />
+          </div>
+      </section>
+
+
+    <!-- Slide 8 -->
+      <section class="slide" id="slide-8" aria-labelledby="s8-title">
+          <h2 id="s8-title">Predspracovanie dát – lagy</h2>
+          <div class="slide-row">
+      <ul>
+        <li>Pre každý ticker zvlášť:
+          <ul>
+            <li>výpočet denného výnosu <code>ret</code> z ceny <code>close</code>,</li>
+            <li>vytvorenie <strong>10 lagov</strong> výnosov: <code>ret_lag_1 … ret_lag_10</code>.</li>
+          </ul>
+        </li>
+        <li>Každý riadok reprezentuje:
+          <ul>
+            <li>konkrétny deň,</li>
+            <li>konkrétnu akciu,</li>
+            <li>vstup: 10 posledných denných výnosov,</li>
+            <li>cieľ: výnos nasledujúceho dňa.</li>
+          </ul>
+        </li>
+        <li>Spojenie všetkých tickerov do jedného veľkého DataFrame <code>df_all</code>.</li>
+        <li>Rozdelenie podľa dátumu: <strong>Train</strong> 2016–2022, <strong>Validation</strong> 2023, <strong>Test</strong> 2024–2025.</li>
+      </ul>
+              <img src="Sliding_window.png"
+                   alt="Sliding window – lagované výnosy"
+                   class="slide-image-right">
+          </div>
+    </section>
+
+    <!-- Slide 9 -->
+    <section class="slide" id="slide-9" aria-labelledby="s9-title">
+      <h2 id="s9-title">Škálovanie a finálny dataset</h2>
+      <ul>
+        <li>Na vstupné lagované výnosy používam <strong>StandardScaler</strong>:
+          <ul>
+            <li>fit na <code>X_train</code>,</li>
+            <li>transform na <code>X_val</code> a <code>X_test</code>.</li>
+          </ul>
+        </li>
+        <li>Po štandardizácii (train): priemer ≈ 0, smerodajná odchýlka ≈ 1.</li>
+        <li>Finálne rozmery (multi-asset):
+          <ul>
+            <li><code>X_train</code>: (912 838, 10)</li>
+            <li><code>X_val</code>: (134 206, 10)</li>
+            <li><code>X_test</code>: (244 294, 10)</li>
+          </ul>
+        </li>
+      </ul>
+    </section>
+      <!-- Slide 9a – Implementácia – dátový pipeline -->
+      <section class="slide" id="slide-9a" aria-labelledby="s9a-title">
+          <h2 id="s9a-title">Implementácia – dátový pipeline</h2>
+          <ul>
+              <li>Jazyk a knižnice:
+                  <ul>
+                      <li>Python: <code>pandas</code>, <code>numpy</code>, <code>scikit-learn</code>,</li>
+                      <li>PyTorch: <code>torch</code>, <code>torch.nn</code>, <code>DataLoader</code>.</li>
+                  </ul>
+              </li>
+              <li>Skript <code>prepare_dataset.py</code>:
+                  <ul>
+                      <li>načítanie všetkých súborov <code>TICKER.csv</code> z priečinka Alpaca,</li>
+                      <li>výpočet denných výnosov <code>ret</code> z ceny <code>close</code>,</li>
+                      <li>generovanie 10 lagov <code>ret_lag_1 … ret_lag_10</code>,</li>
+                      <li>spájanie všetkých tickerov do jedného <code>df_all</code>,</li>
+                      <li>rozdelenie podľa dátumu na <strong>Train</strong> / <strong>Val</strong> / <strong>Test</strong>,</li>
+                      <li>štandardizácia vstupov pomocou <code>StandardScaler</code>,</li>
+                      <li>uloženie do súborov <code>X_train.npy</code>, <code>y_train.npy</code> atď.</li>
+                  </ul>
+              </li>
+              <li>Výhoda:
+                  <ul>
+                      <li>dáta sú pripravené v jednotnom formáte pre všetky modely (MLP aj LSTM),</li>
+                      <li>tréningové skripty už len načítajú <code>.npy</code> súbory a sústredia sa na model.</li>
+                  </ul>
+              </li>
+          </ul>
+          <p class="note">Poznámka : „Celé predspracovanie je v skripte <code>prepare_dataset.py</code>, ktorý mi vyrobí <code>.npy</code> súbory pripravené pre tréning.“</p>
+      </section>
+
+
+      <!-- Slide 10 -->
+    <section class="slide" id="slide-10" aria-labelledby="s10-title">
+      <h2 id="s10-title">Model MLP</h2>
+        <div class="slide-row">
+      <ul>
+        <li>Typ: <strong>Multilayer Perceptron (MLP)</strong> – dopredná neurónová sieť.</li>
+        <li>Vstup: vektor dĺžky 10 (lagované výnosy).</li>
+        <li>Architektúra:
+          <ul>
+            <li>Linear(10 → 64) + ReLU</li>
+            <li>Linear(64 → 32) + ReLU</li>
+            <li>Linear(32 → 1)</li>
+          </ul>
+        </li>
+        <li>
+            Výstup: predikovaný denný výnos
+            <span class="formula">\( \hat{r}_t \)</span>.
+        </li>
+        <li>Optimalizácia: <strong>Adam</strong>, learning rate = 0,001, loss: <strong>MSE</strong> alebo <strong>MAE</strong> – podľa experimentu).</li>
+      </ul>
+            <figure class="slide-image-right">
+                <img src="mlp.png" alt="Schéma MLP siete"  class="slide-image-right"/>
+            </figure>
+        </div>
+    </section>
+      <!-- Slide 10a – Implementácia – tréningový cyklus -->
+      <section class="slide" id="slide-10a" aria-labelledby="s10a-title">
+          <h2 id="s10a-title">Implementácia – tréningový cyklus (PyTorch)</h2>
+          <ul>
+              <li><strong>Dataset a DataLoader</strong>:
+                  <ul>
+                      <li>vlastná trieda <code>NumpyDataset(X, y)</code> (konvertuje <code>numpy</code> na <code>torch.Tensor</code>),</li>
+                      <li><code>DataLoader</code> pre <code>train</code>, <code>val</code>, <code>test</code> – mini-batch tréning.</li>
+                  </ul>
+              </li>
+              <li><strong>Definícia modelu</strong>:
+                  <ul>
+                      <li>MLP / LSTM ako trieda <code>nn.Module</code>,</li>
+                      <li>dopredný prechod (forward) v metóde <code>forward(self, x)</code>.</li>
+                  </ul>
+              </li>
+              <li><strong>Loss funkcia a optimizér</strong>:
+                  <ul>
+                      <li>loss: <code>nn.MSELoss</code> alebo <code>nn.L1Loss</code> (MAE),</li>
+                      <li>optimizér: <strong>Adam</strong> (<code>torch.optim.Adam</code>).</li>
+                  </ul>
+              </li>
+              <li><strong>Tréningová slučka (zjednodušene)</strong>:</li>
+          </ul>
+
+          <pre><code>for epoch in range(n_epochs):
+        for X_batch, y_batch in train_loader:
+        optimizer.zero_grad()
+        preds = model(X_batch)
+        loss = criterion(preds, y_batch)
+        loss.backward()
+        optimizer.step()</code></pre>
+
+          <ul>
+              <li><strong>Výber najlepšieho modelu</strong>:
+                  <ul>
+                      <li>po každej epoche rátam loss na validačnej množine,</li>
+                      <li>ukladám model s najnižším validačným loss (early stopping podľa Val).</li>
+                  </ul>
+              </li>
+          </ul>
+
+          <p class="note">Poznámka : „Pre MLP aj LSTM používam rovnaký tréningový cyklus v PyTorch, líši sa hlavne definícia modelu a loss funkcia (MSE alebo MAE).“</p>
+      </section>
+
+
+      <!-- Slide 11 -->
+    <section class="slide" id="slide-11" aria-labelledby="s11-title">
+      <h2 id="s11-title">Experiment 1: jedna akcia (ADBE)</h2>
+      <ul>
+        <li>Prvý experiment: model MLP trénovaný len na akcii <strong>ADBE (Adobe)</strong>.</li>
+        <li>Dáta: Train/Val/Test rozdelené podľa rokov (2016–2022, 2023, 2024+).</li>
+        <li>Výsledky MLP + MSE (približne):
+          <ul>
+            <li>Test MSE ≈ <code>0,0007</code>,</li>
+            <li>Test MAE ≈ <strong>1,8 %</strong>.</li>
+          </ul>
+        </li>
+        <li>Obchodná stratégia (long, ak predikcia &gt; 0):
+          <ul>
+            <li>priemerný denný výnos: <strong>negatívny</strong>,</li>
+            <li>Sharpe anualizovaný ≈ <strong>-0,83</strong>,</li>
+            <li>Sortino anualizovaný ≈ <strong>-0,77</strong>.</li>
+          </ul>
+        </li>
+        <li>Buy &amp; Hold na ADBE v rovnakom období: tiež negatívny Sharpe ≈ -0,83.</li>
+      </ul>
+      <p class="conclusion">Záver: Na jednej akcii sú výsledky nestabilné a stratégia bola stratová.</p>
+    </section>
+
+    <!-- Slide 12 -->
+    <section class="slide" id="slide-12" aria-labelledby="s12-title">
+      <h2 id="s12-title">Prečo multi-asset dataset</h2>
+      <ul>
+        <li>Trénovanie na jednej akcii:
+          <ul>
+            <li>malý počet dát,</li>
+            <li>model sa prispôsobí špecifikám jedného titulu,</li>
+            <li>zlá generalizácia.</li>
+          </ul>
+        </li>
+        <li>Riešenie:
+          <ul>
+            <li>použiť <strong>viac akcií</strong> (S&amp;P 500 + ETF),</li>
+            <li>učiť jeden model na <strong>veľkom množstve príkladov</strong>,</li>
+            <li>získať robustnejšie vzorce správania trhu.</li>
+          </ul>
+        </li>
+      </ul>
+    </section>
+
+    <!-- Slide 13 -->
+    <section class="slide" id="slide-13" aria-labelledby="s13-title">
+      <h2 id="s13-title">Experiment 2: MLP + MSE (multi-asset)</h2>
+      <ul>
+        <li>Vstup: 10 lagovaných denných výnosov pre akýkoľvek ticker.</li>
+        <li>Tréning na celom multi-asset datasete:
+          <ul>
+            <li><code>X_train</code>: 912 838 riadkov</li>
+            <li><code>X_val</code>: 134 206</li>
+            <li><code>X_test</code>: 244 294</li>
+          </ul>
+        </li>
+        <li>Loss funkcia: <strong>MSE</strong>.</li>
+        <li>Výsledné chyby:
+          <ul>
+                <li>Train MSE ≈ <code>0,000443</code>,</li>
+                <li>Val MSE ≈ <code>0,000362</code>,</li>
+                <li>Test MSE ≈ <code>0,000433</code>.</li>
+          </ul>
+        </li>
+          <li>Obchodná stratégia:
+              <ul>
+                  <li>pravidlo: ak <span class="formula">\( \hat{r}_t &gt; 0 \)</span> → long, inak 0,</li>
+
+                  <li>výnos stratégie = (<code>signal_t · r_t</code>).</li>
+              </ul>
+          </li>
+          <li>Na testovacej množine:
+              <ul>
+                  <li>priemerný denný výnos ≈ <strong>0,0608 %</strong>,</li>
+                  <li>denná volatilita ≈ <strong>2,04 %</strong>,</li>
+                  <li>Sharpe anualizovaný ≈ <strong>0,47</strong>,</li>
+                  <li>Sortino anualizovaný ≈ <strong>0,60</strong>.</li>
+              </ul>
+          </li>
+          <li><strong>Buy &amp; Hold</strong> (na rovnakom období a tituloch):
+              <ul>
+                  <li>priemerný denný výnos ≈ <strong>0,0625 %</strong>,</li>
+                  <li>Sharpe anualizovaný ≈ <strong>0,48</strong>.</li>
+              </ul>
+          </li>
+      </ul>
+        <p class="conclusion">Záver: MLP vytvára ziskovú stratégiu s kladným Sharpeho pomerom, ale výkon je veľmi blízky jednoduchej stratégii Buy &amp; Hold.</p>
+    </section>
+
+    <!-- Slide 14 -->
+    <section class="slide" id="slide-14" aria-labelledby="s14-title">
+      <h2 id="s14-title">Experiment 2b: MLP + MAE (multi-asset)</h2>
+        <ul>
+            <li>Rovnaký dataset a architektúra ako pri <strong>MLP + MSE (multi-asset)</strong>:
+                <ul>
+                    <li>vstup: 10 lagovaných denných výnosov,</li>
+                    <li>výstup: predikovaný denný výnos \(\hat r_t\).</li>
+                </ul>
+            </li>
+            <li>Rozdiel je len v <strong>loss funkcii</strong>:
+                <ul>
+                    <li>namiesto MSE používam <strong>MAE (L1 loss)</strong>,</li>
+                    <li>MAE je menej citlivé na extrémne odchýlky (outliery).</li>
+                </ul>
+            </li>
+            <li>Výsledné chyby na teste:
+                <ul>
+                    <li>Test MAE ≈ <strong>1,35&nbsp;%</strong>.</li>
+                </ul>
+            </li>
+            <li>Obchodná stratégia (ako predtým):
+                <ul>
+                    <li>pravidlo: ak \(\hat r_t &gt; 0\) → <strong>long</strong>, inak 0,</li>
+                    <li>výnos stratégie = \( signal_t \cdot r_t \).</li>
+                </ul>
+            </li>
+            <li>Výsledky na testovacej množine:
+                <ul>
+                    <li>priemerný denný výnos ≈ <strong>0,0613&nbsp;%</strong>,</li>
+                    <li>denná volatilita ≈ <strong>2,01&nbsp;%</strong>,</li>
+                    <li>Sharpe (annualizovaný) ≈ <strong>0,48</strong>,</li>
+                    <li>Sortino (annualizovaný) ≈ <strong>0,61</strong>.</li>
+                </ul>
+            </li>
+            <li>Porovnanie s <strong>Buy &amp; Hold</strong>:
+                <ul>
+                    <li>Buy &amp; Hold: mean daily return ≈ <strong>0,0625&nbsp;%</strong>, Sharpe ≈ <strong>0,48</strong>,</li>
+                    <li>MLP + MAE dosahuje <strong>takmer rovnaký Sharpe</strong> a mierne lepší <strong>Sortino</strong>.</li>
+                </ul>
+            </li>
+        </ul>
+        <p class="conclusion">
+            Záver: MLP trénovaný s MAE (multi-asset) je z hľadiska Sharpe/Sortino
+            <strong>najlepší model</strong> – prakticky na úrovni jednoduchej stratégie Buy &amp; Hold,
+            s mierne lepším downside risk profilom.
+        </p>
+
+    </section>
+
+    <!-- Slide 15 -->
+    <section class="slide" id="slide-15" aria-labelledby="s15-title">
+      <h2 id="s15-title">Prechod na LSTM</h2>
+      <ul>
+        <li>MLP pracuje s vstupom ako s vektorom, <strong>explicitne nevyužíva časový charakter</strong> dát.</li>
+        <li>Časové rady (výnosy, ceny) majú:
+          <ul>
+            <li>autokorelácie,</li>
+            <li>lokálne trendy,</li>
+            <li>zhluky volatility (volatility clustering).</li>
+          </ul>
+        </li>
+        <li><strong>LSTM (Long Short-Term Memory)</strong>:
+          <ul>
+            <li>rekurentná neurónová sieť,</li>
+            <li>spracúva sekvenciu krok za krokom,</li>
+            <li>má vnútornú „pamäť“ stavu.</li>
+          </ul>
+        </li>
+        <li>Cieľ: overiť, či LSTM lepšie zachytí časové vzťahy ako MLP.</li>
+      </ul>
+    </section>
+
+    <!-- Slide 16 -->
+    <section class="slide" id="slide-16" aria-labelledby="s16-title">
+      <h2 id="s16-title">Architektúra LSTM modelu</h2>
+        <div class="slide-row">
+      <ul>
+        <li>Vstup pre LSTM:
+          <ul>
+            <li>sekvencia dĺžky 10: <code>[r_{t-10}, r_{t-9}, …, r_{t-1}]</code></li>
+            <li>každý krok má 1 vstup (denný výnos).</li>
+          </ul>
+        </li>
+        <li>Architektúra:
+          <ul>
+            <li>LSTM vrstva: <code>input_size = 1</code>, <code>hidden_size = 32</code>, <code>num_layers = 1</code>, <code>batch_first = true</code></li>
+            <li>Posledný skrytý stav → <code>Linear(32 → 1)</code>.</li>
+          </ul>
+        </li>
+        <li>
+          Výstup: predikovaný denný výnos
+          <span class="formula">\( \hat{r}_t \)</span>.
+        </li>
+
+        <li>Loss funkcia: <strong>MSE</strong> alebo <strong>MAE</strong> – podľa experimentu</li>
+      </ul>
+
+            <img src="lstm.webp"
+                 alt="Sliding window – lagované výnosy"
+                 class="slide-image-right">
+        </div>
+    </section>
+
+    <!-- Slide 17 -->
+    <section class="slide" id="slide-17" aria-labelledby="s17-title">
+      <h2 id="s17-title">Experiment 3: LSTM + MAE</h2>
+      <ul>
+        <li>Tréning na tom istom multi-asset datasete ako MLP.</li>
+        <li>Loss funkcia: <strong>MAE</strong>.</li>
+        <li>Výsledné chyby (Test): Test MAE ≈ <strong>1,35 %</strong>.</li>
+        <li>Stratégia (predikcia &gt; 0 → long):
+          <ul>
+            <li>priemerný denný výnos ≈ <strong>0,0365 %</strong>,</li>
+            <li>denná volatilita ≈ <strong>1,40 %</strong>,</li>
+            <li>Sharpe anualizovaný ≈ <strong>0,41</strong>,</li>
+            <li>Sortino anualizovaný ≈ <strong>0,31</strong>.</li>
+          </ul>
+        </li>
+        <li><strong>Buy &amp; Hold</strong>: Sharpe anualizovaný ≈ <strong>0,48</strong>.</li>
+      </ul>
+      <p class="conclusion">Záver: LSTM poskytuje ziskovú stratégiu, ale z pohľadu Sharpeho pomeru zaostáva za Buy &amp; Hold aj za MLP modelom.</p>
+    </section>
+
+    <!-- Slide 18 -->
+    <section class="slide" id="slide-18" aria-labelledby="s18-title">
+      <h2 id="s18-title">Experiment 3b: LSTM + MSE </h2>
+      <ul>
+        <li>Rovnaký LSTM model ako v predchádzajúcom experimente:
+          <ul>
+            <li>vstup: sekvencia 10 denných výnosov,</li>
+            <li>LSTM (<code>hidden size = 32</code>, 1 vrstva) + <code>Linear(32 → 1)</code>.</li>
+          </ul>
+        </li>
+        <li>Rozdiel: <strong>loss funkcia = MSE</strong> namiesto MAE.</li>
+        <li>Výsledné chyby:
+          <ul>
+            <li>Train MSE ≈ <code>0,000432</code></li>
+            <li>Val MSE ≈ <code>0,000358</code></li>
+            <li>Test MSE ≈ <code>0,000430</code></li>
+          </ul>
+        </li>
+        <li>Stratégia (predikcia &gt; 0 → long):
+          <ul>
+            <li>priemerný denný výnos ≈ <strong>0,031 %</strong>,</li>
+            <li>denná volatilita ≈ <strong>1,38 %</strong>,</li>
+            <li>Sharpe (anualizovaný) ≈ <strong>0,36</strong>,</li>
+            <li>Sortino (anualizovaný) ≈ <strong>0,29</strong>.</li>
+          </ul>
+        </li>
+        <li><strong>Buy &amp; Hold</strong>: Sharpe (anualizovaný) ≈ <strong>0,48</strong>.</li>
+      </ul>
+      <p class="note">Poznámka (ústne): „LSTM s MSE má najlepšiu MSE spomedzi modelov, ale z pohľadu Sharpeho pomeru je najslabší.“</p>
+    </section>
+    <section class="slide" id="slide-19" aria-labelledby="s19-title">
+      <h2 id="s19-title">Porovnanie MLP a LSTM</h2>
+      <ul>
+        <li><strong>MLP + MSE:</strong> Sharpe ≈ 0,47 – zisková stratégia, veľmi blízko k Buy &amp; Hold.</li>
+        <li><strong>MLP + MAE:</strong> Sharpe ≈ 0,48, Sortino ≈ 0,61 –
+          najlepší model, prakticky na úrovni Buy &amp; Hold (Sharpe ≈ 0,48).</li>
+        <li><strong>LSTM + MAE:</strong> Sharpe ≈ 0,41 – zisková stratégia, ale slabšia ako MLP modely.</li>
+        <li><strong>LSTM + MSE:</strong> Sharpe ≈ 0,36 – najslabší Sharpe, hoci má veľmi nízku testovaciu MSE.</li>
+        <li><strong>Buy &amp; Hold:</strong> Sharpe ≈ 0,48 – jednoduchý benchmark, s ktorým porovnávam všetky modely.</li>
+      </ul>
+      <p class="conclusion">
+        MLP trénovaný s MSE aj MAE vytvára ziskové stratégie s kladným Sharpeho pomerom
+        a výsledky sú veľmi blízko Buy &amp; Hold.
+        LSTM má nižší Sharpe, aj keď pri MSE dosahuje veľmi dobrú štatistickú chybu (MSE).
+        To ukazuje, že minimalizovať MSE/MAE ešte neznamená maximalizovať Sharpe/Sortino.
+      </p>
+    </section>
+
+
+      <!-- Slide 22 -->
+    <section class="slide" id="slide-20" aria-labelledby="s20-title">
+        <h2 id="s20-title">Porovnanie modelov a Buy &amp; Hold</h2>
+        <div class="table-wrap">
+            <table class="compare">
+                <thead>
+                <tr>
+                    <th>Model</th>
+                    <th>Loss</th>
+                    <th>Test chyba</th>
+                    <th>Mean daily return</th>
+                    <th>Sharpe (annual)</th>
+                    <th>Sortino (annual)</th>
+                </tr>
+                </thead>
+                <tbody>
+                      <tr>
+                        <tr>
+                          <td>MLP</td>
+                          <td>MSE</td>
+                          <td>≈ 0,000433</td>
+                          <td>≈ 0,0608 %</td>
+                          <td>≈ 0,47</td>
+                          <td>≈ 0,60</td>
+
+                      </tr>
+                      <tr>
+                        <td>MLP</td>
+                        <td>MAE</td>
+                        <td>≈ 1,35 %</td>
+                        <td>≈ 0,0613 %</td>
+                        <td>≈ 0,48</td>
+                        <td>≈ 0,61</td>
+                      </tr>
+                      <tr>
+                        <td>LSTM</td>
+                        <td>MAE</td>
+                        <td>≈ 1,35 %</td>
+                        <td>≈ 0,0365 %</td>
+                        <td>≈ 0,41</td>
+                        <td>≈ 0,31</td>
+                      </tr>
+                      <tr>
+                        <td>LSTM</td>
+                          <td>MSE</td>
+                          <td>≈ 0,000430</td>
+                          <td>≈ 0,031 %</td>
+                          <td>≈ 0,36</td>
+                          <td>≈ 0,29</td>
+                      </tr>
+                      <tr>
+                        <td>Buy &amp; Hold</td>
+                        <td>–</td>
+                        <td>–</td>
+                        <td>≈ 0,0625 %</td>
+                        <td>≈ 0,48</td>
+                        <td>–</td>
+                      </tr>
+                    </tbody>
+
+            </table>
+        </div>
+    </section>
+
+    <!-- Slide 23 -->
+    <section class="slide" id="slide-21" aria-labelledby="s21-title">
+  <h2 id="s21-title">Body pod tabuľkou</h2>
+  <ul>
+    <li>Všetky modely vytvárajú <strong>ziskové stratégie</strong> (Sharpe &gt; 0).</li>
+
+    <li><strong>MLP + MAE:</strong>
+      <ul>
+        <li>Sharpe ≈ <strong>0,48</strong>, Sortino ≈ <strong>0,61</strong>,</li>
+        <li>najlepší model z hľadiska Sharpe/Sortino, prakticky rovnaký ako <strong>Buy &amp; Hold</strong>.</li>
+      </ul>
+    </li>
+
+    <li><strong>MLP + MSE:</strong>
+      <ul>
+        <li>Sharpe ≈ <strong>0,47</strong> – zisková stratégia, veľmi blízko k MLP + MAE a Buy &amp; Hold.</li>
+      </ul>
+    </li>
+
+    <li><strong>LSTM + MAE:</strong>
+      <ul>
+        <li>Sharpe ≈ <strong>0,41</strong> – zisková, ale slabšia ako oba MLP modely.</li>
+      </ul>
+    </li>
+
+    <li><strong>LSTM + MSE:</strong>
+      <ul>
+        <li>má <strong>najnižšiu testovaciu MSE</strong>, ale <strong>najnižší Sharpe</strong> (≈ 0,36),</li>
+        <li>to ukazuje, že dobrá štatistická chyba automaticky nezaručuje najlepší finančný výkon.</li>
+      </ul>
+    </li>
+
+    <li><strong>Záver:</strong>
+      <ul>
+        <li>optimalizácia MSE/MAE ≠ optimalizácia Sharpe/Sortino,</li>
+        <li>najlepšie výsledky dávajú MLP modely, pričom MLP + MAE je z pohľadu Sharpe/Sortino mierne lepší ako MLP + MSE,</li>
+        <li>to motivuje ďalší krok – použiť <strong>Sharpe/Sortino</strong> priamo ako <strong>loss</strong> funkciu.</li>
+      </ul>
+    </li>
+  </ul>
+</section>
+
+
+
+
+
+    <!-- Slide 20 -->
+    <section class="slide" id="slide-22" aria-labelledby="s24-title">
+      <h2 id="s24-title">Zhrnutie doterajšej práce</h2>
+      <ul>
+        <li>Pripravil som veľký multi-asset dataset (S&amp;P 500 + ETF, 2016–2025).</li>
+        <li>Implementoval som predspracovanie:
+          <ul>
+            <li>výpočet denných výnosov,</li>
+            <li>lagovanie (10 dní),</li>
+            <li>štandardizáciu,</li>
+            <li>časové rozdelenie Train/Val/Test.</li>
+          </ul>
+        </li>
+          <li>Otestoval som viaceré modely:
+              <ul>
+                  <li>MLP + MSE (jedna akcia aj multi-asset),</li>
+                  <li>MLP + MAE (jedna akcia aj multi-asset),</li>
+                  <li>LSTM + MAE (multi-asset),</li>
+                  <li>LSTM + MSE (multi-asset).</li>
+              </ul>
+          </li>
+
+          <li>Vyhodnotil som: MSE/MAE, Sharpeho a Sortinov pomer, porovnanie s Buy &amp; Hold.</li>
+      </ul>
+    </section>
+
+
+  </main>
+
+  <!-- Plávajúce tlačidlá na rýchly pohyb medzi slidmi -->
+  <nav class="pager" aria-label="Stránkovanie">
+    <a class="prev" href="#" aria-label="Predošlý slide" title="Predošlý slide">‹</a>
+    <a class="next" href="#slide-2" aria-label="Ďalší slide" title="Ďalší slide">›</a>
+  </nav>
+
+  <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+  <script>
+    // Export do PowerPointu pomocou PptxGenJS
+    (function(){
+      const btn = document.getElementById('downloadPptx');
+      if(!btn || typeof PptxGenJS === 'undefined') return;
+      btn.addEventListener('click', async function(){
+        try{
+          const pptx = new PptxGenJS();
+          pptx.layout = 'LAYOUT_16x9';
+
+          const sections = document.querySelectorAll('.slide');
+          sections.forEach((sec, i) => {
+            const slide = pptx.addSlide();
+            slide.background = { color: 'FFFFFF' };
+
+            // Názov slidu (h1/h2)
+            const titleEl = sec.querySelector('h1, h2');
+            if (titleEl) {
+              slide.addText(titleEl.textContent.trim(), {
+                x: 0.5, y: 0.4, w: 9.0, h: 0.7,
+                fontSize: 28, bold: true, color: '000000'
+              });
+            }
+
+            // Odrážky – prejdeme všetky <li> a približne zachováme vnorenie
+            const liNodes = Array.from(sec.querySelectorAll('li'));
+            if (liNodes.length) {
+              const items = liNodes.map(li => {
+                // Spočítaj hĺbku vnorenia (počet UL/OL do sekcie)
+                let depth = 0;
+                let node = li.parentElement;
+                while (node && node !== sec) {
+                  if (node.tagName === 'UL' || node.tagName === 'OL') depth++;
+                  node = node.parentElement;
+                }
+                // Text odrážky
+                const txt = (li.textContent || '')
+                  .replace(/\s+/g, ' ')
+                  .trim();
+                // Simulujeme pod-úroveň prefixom medzier (kvôli kompatibilite naprieč verziami)
+                const pref = depth > 1 ? '    '.repeat(depth - 1) : '';
+                return { text: pref + txt, options: { bullet: true, fontSize: 18, color: '363636' } };
+              });
+              slide.addText(items, {
+                x: 0.7,
+                y: titleEl ? 1.2 : 0.7,
+                w: 8.6,
+                h: 5.0
+              });
+            }
+
+            // Poznámka / Záver / Poznámka pod čiarou
+            const note = sec.querySelector('.note');
+            if (note) {
+              slide.addText((note.textContent || '').trim(), {
+                x: 0.7, y: 6.2, w: 8.6, h: 0.6,
+                fontSize: 14, italic: true, color: '666666'
+              });
+            }
+            const concl = sec.querySelector('.conclusion');
+            if (concl) {
+              slide.addText((concl.textContent || '').trim(), {
+                x: 0.7, y: 6.8, w: 8.6, h: 0.8,
+                fontSize: 16, bold: true, color: '000000'
+              });
+            }
+            const foot = sec.querySelector('.footnote');
+            if (foot) {
+              slide.addText((foot.textContent || '').trim(), {
+                x: 0.7, y: 7.6, w: 8.6, h: 0.6,
+                fontSize: 12, color: '666666'
+              });
+            }
+          });
+
+          await pptx.writeFile({ fileName: 'prezentacia_sharpe_sortino.pptx' });
+        } catch (e){
+          alert('Nepodarilo sa vytvoriť PPTX: ' + e);
+          console.error(e);
+        }
+      });
+    })();
+  </script>
+
+  <script>
+    // Priprava tlače do PDF: tlačidlo vyvolá natívne okno Print a použije print CSS
+    (function(){
+      const btnPdf = document.getElementById('downloadPdf');
+      if(btnPdf){
+        btnPdf.addEventListener('click', () => {
+          document.body.classList.add('print-ready');
+          setTimeout(() => window.print(), 50);
+          // po pokuse o tlač odstránime triedu (pre prípad, že sa užívateľ vráti)
+          setTimeout(() => document.body.classList.remove('print-ready'), 2000);
+        });
+      }
+    })();
+  </script>
+
+  <script>
+      // Малé vylepšenie navigácie: prev/next šípky + klávesnica (←/→, PageUp/PageDown)
+      (function() {
+          const ids = Array.from(document.querySelectorAll('.slide')).map(s => '#' + s.id);
+          const prev = document.querySelector('.pager .prev');
+          const next = document.querySelector('.pager .next');
+
+          function getCurrentIndex() {
+              const hash = window.location.hash || '#slide-1';
+              const idx = ids.indexOf(hash);
+              return idx === -1 ? 0 : idx;
+          }
+
+          function goTo(offset) {
+              let idx = getCurrentIndex();
+              let newIdx = idx + offset;
+              if (newIdx < 0) newIdx = 0;
+              if (newIdx > ids.length - 1) newIdx = ids.length - 1;
+              window.location.hash = ids[newIdx];
+          }
+
+          function updatePager() {
+              const idx = getCurrentIndex();
+              const prevIdx = Math.max(0, idx - 1);
+              const nextIdx = Math.min(ids.length - 1, idx + 1);
+              prev.href = ids[prevIdx];
+              next.href = ids[nextIdx];
+              prev.classList.toggle('disabled', idx === 0);
+              next.classList.toggle('disabled', idx === ids.length - 1);
+          }
+
+          // Клики по стрелкам снизу
+          prev.addEventListener('click', function(e) {
+              e.preventDefault();
+              goTo(-1);
+          });
+          next.addEventListener('click', function(e) {
+              e.preventDefault();
+              goTo(1);
+          });
+
+          // Переключение слайдов по клавишам
+          document.addEventListener('keydown', function(e) {
+              const tag = (e.target.tagName || '').toLowerCase();
+              // не мешаем, если юзер что-то вводит в input/textarea
+              if (tag === 'input' || tag === 'textarea') return;
+
+              if (e.key === 'ArrowRight' || e.key === 'PageDown') {
+                  e.preventDefault();
+                  goTo(1);
+              } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+                  e.preventDefault();
+                  goTo(-1);
+              }
+          });
+
+          window.addEventListener('hashchange', updatePager, false);
+          window.addEventListener('load', updatePager, false);
+      })();
+  </script>
+
+</body>
+</html>

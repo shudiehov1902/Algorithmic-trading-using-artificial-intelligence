@@ -1,0 +1,218 @@
+:root{
+  /* Light, elegant pitch-deck palette */
+  --bg: #f7f7f5; /* off‑white paper */
+  --paper-ink: #0f0f0f; /* near black */
+  --text: #1f2937; /* slate-800 */
+  --muted: #6b7280; /* gray-500 */
+  --accent: #111827; /* subtle dark accent */
+  --accent-2: #e5e7eb; /* light divider */
+  --link: #111827;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial;
+  color: var(--text);
+  background:
+    radial-gradient(1200px 800px at 20% 10%, rgba(0,0,0,.015), transparent 60%),
+    radial-gradient(900px 600px at 80% 30%, rgba(0,0,0,.02), transparent 60%),
+    linear-gradient(180deg, #fafaf9, var(--bg));
+}
+
+/* Horná lišta – minimalistická, svetlá */
+.topbar{
+  position: sticky;
+  top:0; left:0; right:0;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:1rem;
+  padding: .6rem 1rem;
+  background: rgba(255,255,255,.75);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--accent-2);
+  z-index: 50;
+}
+.brand{display:flex; align-items:baseline; gap:.6rem}
+.brand-title{font-weight:700; letter-spacing:.2px; color:#0b0b0b}
+.brand-sub{color:var(--muted); font-size:.9rem}
+.quicknav{display:flex; gap:.25rem; flex-wrap:wrap}
+.quicknav a{
+  color: #111;
+  text-decoration:none;
+  border:1px solid var(--accent-2);
+  padding:.25rem .5rem;
+  border-radius:.5rem;
+  font-size:.85rem;
+}
+.quicknav a:hover{border-color:#111; color:#111}
+
+/* Paluba (deck) – fullscreen sekcie so scroll-snap) */
+.deck{
+  height: calc(100svh - 48px);
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+}
+.slide{
+  min-height: calc(100svh - 48px);
+  scroll-snap-align: start;
+  display:grid;
+  align-content:center;
+  justify-content:center;
+  padding: 3rem 1.25rem 4rem;
+  background:
+    radial-gradient(1000px 600px at 15% 25%, rgba(0,0,0,.02), transparent 60%),
+    linear-gradient(180deg, transparent, rgba(0,0,0,.015));
+}
+/* Typografia v štýle pitch decku */
+.slide h1, .slide h2{margin:.2rem 0 1rem; line-height:1.15; color:#0b0b0b}
+.slide h1{font-family: ui-serif, Georgia, 'Times New Roman', Times, serif; font-weight:800; letter-spacing:-.01em; font-size: clamp(2.2rem, 2.4rem + 1.6vw, 4rem);} 
+.slide h2{font-family: ui-serif, Georgia, 'Times New Roman', Times, serif; font-weight:700; font-size: clamp(1.6rem, 1.2rem + 1vw, 2.6rem);} 
+.slide ul{max-width: 1100px; margin:0; padding-left:1.25rem}
+.slide li{margin:.35rem 0;}
+.slide code{
+  background: rgba(0,0,0,.035);
+  padding:.1rem .35rem; border-radius:.35rem; color:#0f172a
+}
+.subtitle ul{list-style: none; padding:0}
+.subtitle li{margin:.3rem 0; color: var(--muted)}
+
+/* Tabuľka porovnania */
+.table-wrap{max-width:1100px; width:100%}
+.compare{width:100%; border-collapse:separate; border-spacing:0; background:#fff; border:1px solid var(--accent-2); border-radius:.75rem; overflow:hidden}
+.compare thead th{background:#f3f4f6; color:#111; text-align:left; padding:.75rem .9rem; border-bottom:1px solid var(--accent-2)}
+.compare tbody td{padding:.7rem .9rem; border-bottom:1px solid #eef0f3}
+.compare tbody tr:last-child td{border-bottom:none}
+.compare th, .compare td{font-size:clamp(.9rem,.85rem + .2vw,1rem)}
+.compare tbody tr:nth-child(odd){background:#fafafa}
+.compare tbody tr:hover{background:#f5f5f5}
+.compare td:nth-child(1){font-weight:600}
+.compare td:nth-child(5), .compare td:nth-child(6), .compare td:nth-child(4){white-space:nowrap}
+
+/* Hero štýl pre prvý slide */
+.slide.hero{align-content:center; text-align:center}
+.slide.hero h1{font-size: clamp(3rem, 4vw + 2rem, 6rem)}
+.hero .subtitle{margin-top:1.25rem}
+.hero .subtitle ul{display:inline-block; text-align:left}
+.hero .tagline{margin-top:1.25rem; letter-spacing:.18em; text-transform:uppercase; font-size:clamp(.8rem, .5rem + .5vw, 1rem); color:#111}
+.credits{position:absolute; left:0; right:0; bottom:2.25rem; text-align:center; color:#6b7280; font-weight:600}
+.credits small{display:block; letter-spacing:.18em}
+
+/* Poznámky a závery */
+.note{color: var(--muted); font-style: italic; margin-top:1rem}
+.conclusion{margin-top:1rem; padding:.75rem 1rem; border-left:3px solid #111; background: rgba(0,0,0,.035); border-radius:.25rem}
+.footnote{margin-top:1rem; color: var(--muted)}
+
+/* Pager šípky – svetlé */
+.pager{
+  position: fixed; inset: auto 0 10px 0; display:flex; justify-content:space-between; pointer-events:none; padding:0 12px; z-index:60
+}
+.pager a{
+  pointer-events:auto;
+  width:44px; height:44px; display:grid; place-items:center;
+  text-decoration:none; color:#111;
+  background: rgba(255,255,255,.85);
+  border:1px solid var(--accent-2);
+  border-radius: .75rem;
+  font-size: 28px; line-height: 1;
+}
+.pager a:hover{border-color:#111; color:#111}
+.pager a.disabled{opacity:.35; pointer-events:none}
+
+/* Responsivita */
+@media (min-width: 800px){
+  .slide{padding: 3.5rem 2.5rem 5rem}
+}
+
+
+/* Download button styles */
+.actions{display:flex; align-items:center; margin-left:auto}
+.download-btn{
+  margin-left:.5rem; padding:.4rem .75rem; border-radius:.5rem;
+  background:#111; color:#fff; border:1px solid #111; font-weight:600; cursor:pointer;
+}
+.download-btn:hover{opacity:.9}
+
+/* Print styles for PDF export */
+@media print{
+  :root{color-scheme: light;}
+  html, body{height:auto;}
+  body{
+    -webkit-print-color-adjust: exact; /* Safari/Chrome */
+    print-color-adjust: exact; /* modern */
+    background: #ffffff; /* let backgrounds on slides render clean */
+  }
+  /* Page size to match 16:9 slides for best fidelity */
+  @page{ size: 1280px 720px; margin: 0; }
+
+  /* Hide UI chrome */
+  .topbar, .pager{ display:none !important; }
+
+  /* Make deck flow vertically without snapping/overflow */
+  .deck{ height:auto !important; overflow: visible !important; }
+
+  /* Each slide becomes one page; prevent splitting */
+  .slide{
+    /* Make each slide a fixed 16:9 canvas and center its content */
+    width: 1280px;
+    height: 720px;
+    margin: 0 auto;
+    padding: 2.5rem; /* inner safe area */
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    min-height: auto !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    break-after: page;
+    page-break-after: always;
+    /* Re-apply light backgrounds and keep typography */
+    background:
+      radial-gradient(1000px 600px at 15% 25%, rgba(0,0,0,.02), transparent 60%),
+      linear-gradient(180deg, transparent, rgba(0,0,0,.015));
+    color: var(--text);
+  }
+  .slide:last-child{ break-after: auto; page-break-after: auto; }
+
+  /* Adjust absolute elements for print */
+  .credits{ position: static; margin-top: 1.25rem; }
+}
+/* Общий ряд: текст слева + картинка справа */
+.slide-row {
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+}
+
+/* Список растягиваем, чтобы он занимал левую часть */
+#slide-7 ul {
+    flex: 1;
+}
+
+/* Картинка справа */
+.slide-image-right {
+    flex: 0 0 35%;        /* ширина примерно 35% слайда */
+    max-height: 60vh;     /* не дать ей стать слишком высокой */
+    object-fit: contain;
+    border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+}
+
+/* На мобильных — стекаем вертикально */
+@media (max-width: 900px) {
+    .slide-row {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .slide-image-right {
+        width: 100%;
+        max-width: 480px;
+    }
+}
+.formula {
+    margin: 0.3rem 0 0.8rem 1.8rem; /* отступ слева, чтобы формула была под буллетом */
+    font-size: 1.3rem;              /* чуть больше шрифт, чем текст */
+}
