@@ -192,40 +192,36 @@ model = StockMixer(
     dropout=0.1,
 ).to(device)
 
+# ---- Train with MAE (L1). For Huber use: nn.SmoothL1Loss(beta=0.01)
+criterion_train = nn.L1Loss()
+
+# ---- Metrics
 criterion_mse = nn.MSELoss()
 criterion_mae = nn.L1Loss()
+
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
 
 # =====================================================
 # 5) Training / prediction helpers
 # =====================================================
-def run_epoch(dataloader, model, optimizer=None) -> float:
-    if optimizer is None:
-        model.eval()
-    else:
-        model.train()
-
+def run_train_epoch(dataloader, model, optimizer) -> float:
+    model.train()
     total = 0.0
     n = 0
     for Xb, yb in dataloader:
         Xb = Xb.to(device)
         yb = yb.to(device)
 
-        if optimizer is not None:
-            optimizer.zero_grad()
-
+        optimizer.zero_grad()
         pred = model(Xb)
-        loss = criterion_mse(pred, yb)
-
-        if optimizer is not None:
-            loss.backward()
-            optimizer.step()
+        loss = criterion_train(pred, yb)
+        loss.backward()
+        optimizer.step()
 
         bs = Xb.size(0)
         total += loss.item() * bs
         n += bs
-
     return total / n
 
 
@@ -254,7 +250,7 @@ def get_predictions_np(dataloader, model) -> Tuple[np.ndarray, np.ndarray]:
             Xb = Xb.to(device)
             pred = model(Xb)
             preds.append(pred.detach().cpu().numpy().reshape(-1))
-            ys.append(yb.numpy().reshape(-1))
+            ys.append(yb.detach().cpu().numpy().reshape(-1))
     return np.concatenate(preds), np.concatenate(ys)
 
 
@@ -305,10 +301,6 @@ def info_ratio_annual(port_daily: pd.Series, mkt_daily: pd.Series) -> float:
 
 
 def cumulative_excess_wealth(port_daily: pd.Series, mkt_daily: pd.Series) -> float:
-    """
-    Excess wealth at the end:
-      W_port(T) - W_mkt(T), where W(t)=prod(1+r)-1 (same start 0)
-    """
     p, m = align_two(port_daily, mkt_daily)
     if len(p) == 0:
         return float("nan")
@@ -318,8 +310,7 @@ def cumulative_excess_wealth(port_daily: pd.Series, mkt_daily: pd.Series) -> flo
 
 
 # =====================================================
-# 7) Fast per-epoch prep for backtest
-#    (one sort per day per epoch, then reuse in grid)
+# 7) Daily cache for faster backtest/grid
 # =====================================================
 @dataclass
 class DailyCache:
@@ -352,13 +343,7 @@ def build_daily_cache(df: pd.DataFrame) -> DailyCache:
         ret_maps.append({tt: float(rr) for tt, rr in zip(t, r)})
 
     mkt = df.groupby("date", sort=True)["ret"].mean().sort_index()
-    return DailyCache(
-        dates=dates,
-        tickers_sorted=tickers_sorted,
-        rank_maps=rank_maps,
-        ret_maps=ret_maps,
-        mkt_daily=mkt,
-    )
+    return DailyCache(dates=dates, tickers_sorted=tickers_sorted, rank_maps=rank_maps, ret_maps=ret_maps, mkt_daily=mkt)
 
 
 def backtest_longonly_buffer_cost(
@@ -369,15 +354,6 @@ def backtest_longonly_buffer_cost(
     cost_bps: float,
     charge_entry_cost: bool = True,
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """
-    Long-only top-K with:
-      - rebalance every N days
-      - rank buffer (hysteresis)
-      - turnover-based cost (bps)
-
-    Returns:
-      gross_series, net_series, turnover_series
-    """
     holdings: Set[str] = set()
     gross: List[float] = []
     net: List[float] = []
@@ -389,9 +365,8 @@ def backtest_longonly_buffer_cost(
         ret_map = cache.ret_maps[i]
 
         if i == 0:
-            new_holdings = set(top_list[:k])
+            holdings = set(top_list[:k])
             to = 1.0 if charge_entry_cost else 0.0
-            holdings = new_holdings
         else:
             do_reb = (i % rebalance_every == 0)
             if do_reb:
@@ -431,11 +406,10 @@ def backtest_longonly_buffer_cost(
 
 
 # =====================================================
-# 8) Training + per-epoch grid-search on VAL
-#    Objective: robust Val NET alpha IR (min of H1/H2)
+# 8) Training + per-epoch grid-search on VAL (objective: robust Val NET alpha IR)
 # =====================================================
 n_epochs = 50
-best_val_loss = float("inf")
+best_val_mae = float("inf")  # tracking only
 
 best_score_global = -float("inf")
 best_state_dict = None
@@ -457,26 +431,21 @@ def robust_net_alpha_ir(net_series: pd.Series, mkt_series: pd.Series) -> float:
 
 
 for epoch in range(1, n_epochs + 1):
-    train_loss = run_epoch(train_loader, model, optimizer)
-    val_loss = run_epoch(val_loader, model, optimizer=None)
+    train_mae = run_train_epoch(train_loader, model, optimizer)
 
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
+    val_mse, val_mae = evaluate(val_loader, model)
+    if val_mae < best_val_mae:
+        best_val_mae = val_mae
 
     do_eval = (epoch == 1) or (epoch % EVAL_EVERY_EPOCH == 0) or (epoch == n_epochs)
     if not do_eval:
         if epoch % 5 == 0:
-            print(f"Epoch {epoch:3d} | train MSE: {train_loss:.6e} | val MSE: {val_loss:.6e}")
+            print(f"Epoch {epoch:3d} | train MAE: {train_mae:.6e} | val MAE: {val_mae:.6e} | val MSE: {val_mse:.6e}")
         continue
 
     y_pred_val, y_true_val = get_predictions_np(val_loader, model)
     df_val = pd.DataFrame(
-        {
-            "date": pd.to_datetime(val_dates),
-            "ticker": val_tickers.astype(str),
-            "pred": y_pred_val.reshape(-1),
-            "ret": y_true_val.reshape(-1),
-        }
+        {"date": pd.to_datetime(val_dates), "ticker": val_tickers.astype(str), "pred": y_pred_val, "ret": y_true_val}
     )
     cache_val = build_daily_cache(df_val)
 
@@ -505,7 +474,7 @@ for epoch in range(1, n_epochs + 1):
         best_state_dict = copy.deepcopy(model.state_dict())
 
     print(
-        f"Epoch {epoch:3d} | train MSE: {train_loss:.6e} | val MSE: {val_loss:.6e} "
+        f"Epoch {epoch:3d} | train MAE: {train_mae:.6e} | val MAE: {val_mae:.6e} | val MSE: {val_mse:.6e} "
         f"| best VAL robust NET alpha IR (epoch): {best_score_epoch:.4f} params(K,reb,buf)={best_params_epoch} "
         f"| best GLOBAL: {best_score_global:.4f} params={best_params}"
     )
@@ -517,7 +486,7 @@ model.load_state_dict(best_state_dict)
 best_k, best_reb, best_buf = best_params
 
 print("\n=== SELECTION SUMMARY ===")
-print("Best val MSE (tracking only):", best_val_loss)
+print("Best val MAE (tracking only):", best_val_mae)
 print("Best GLOBAL robust Val NET alpha IR:", best_score_global)
 print("Best params (K, rebalance_every, buffer):", best_params)
 print("Cost config (selection):", f"COST_BPS={COST_BPS}, CHARGE_ENTRY_COST={CHARGE_ENTRY_COST}")
@@ -541,12 +510,7 @@ print(f"Test:  MSE={test_mse:.6e}, MAE={test_mae:.6e}")
 # =====================================================
 y_pred_test, y_true_test = get_predictions_np(test_loader, model)
 df_test = pd.DataFrame(
-    {
-        "date": pd.to_datetime(test_dates),
-        "ticker": test_tickers.astype(str),
-        "pred": y_pred_test.reshape(-1),
-        "ret": y_true_test.reshape(-1),
-    }
+    {"date": pd.to_datetime(test_dates), "ticker": test_tickers.astype(str), "pred": y_pred_test, "ret": y_true_test}
 )
 cache_test = build_daily_cache(df_test)
 mkt = cache_test.mkt_daily
@@ -611,9 +575,6 @@ print("K=50  NET Sharpe:", sharpe_annual_series(net_50), "NET Sortino:", sortino
       "NET Cum:", cumulative_return(net_50), "Alpha IR:", info_ratio_annual(net_50, mkt), "avg TO:", float(to_50.mean()))
 
 
-# -----------------------
-# Year-by-year breakdown
-# -----------------------
 def report_by_year(title: str, gross: pd.Series, net: pd.Series, mkt_series: pd.Series, turnover: pd.Series):
     years = sorted(set(gross.dropna().index.year))
     print(f"\n=== {title} (by year) ===")
@@ -623,7 +584,6 @@ def report_by_year(title: str, gross: pd.Series, net: pd.Series, mkt_series: pd.
         m_y = mkt_series[mkt_series.index.year == y]
         to_y = turnover[turnover.index.year == y]
         if len(g_y) < 30 or len(m_y) < 30:
-            # skip too-short year fragments
             continue
         report_block(
             title=f"{y}",
@@ -643,9 +603,6 @@ report_by_year(
 )
 
 
-# -----------------------
-# Fee sensitivity (keep holdings/turnover fixed)
-# -----------------------
 def apply_cost_from_turnover(gross: pd.Series, turnover: pd.Series, cost_bps: float) -> pd.Series:
     gross2, to2 = align_two(gross, turnover)
     return gross2 - to2 * (cost_bps / 10000.0)
