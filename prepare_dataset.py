@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-DATA_DIR = "/data/alpaca/alpaca_sp500_etf_2025_1day_open_filled"
+DATA_DIR = "/Users/vladshudegov/BP/Algorithmic-trading-using-artificial-intelligence/data"
 LAGS = 10
 
 
@@ -45,7 +45,7 @@ for path in files:
 df_all = pd.concat(all_dfs, ignore_index=True)
 df_all = df_all.sort_values("open_date").reset_index(drop=True)
 
-print("Итоговый размер df_all:", df_all.shape)
+print("Size df_all:", df_all.shape)
 print(df_all.head())
 
 

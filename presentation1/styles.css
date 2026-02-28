@@ -60,17 +60,33 @@ body{
   display:grid;
   align-content:center;
   justify-content:center;
-  padding: 3rem 1.25rem 4rem;
+  padding: 3rem 1.25rem 4.75rem; /* extra bottom space for footer */
+  position: relative; /* for footer positioning */
   background:
     radial-gradient(1000px 600px at 15% 25%, rgba(0,0,0,.02), transparent 60%),
     linear-gradient(180deg, transparent, rgba(0,0,0,.015));
 }
+/* Центрирование прямых дочерних элементов на слайдах без slide-row */
+.slide:not(:has(.slide-row)) > * {
+  text-align: center;
+  margin-left: auto;
+  margin-right: auto;
+}
+.slide:not(:has(.slide-row)) > ul {
+  text-align: left;
+  display: inline-block;
+}
 /* Typografia v štýle pitch decku */
 .slide h1, .slide h2{margin:.2rem 0 1rem; line-height:1.15; color:#0b0b0b}
 .slide h1{font-family: ui-serif, Georgia, 'Times New Roman', Times, serif; font-weight:800; letter-spacing:-.01em; font-size: clamp(2.2rem, 2.4rem + 1.6vw, 4rem);} 
-.slide h2{font-family: ui-serif, Georgia, 'Times New Roman', Times, serif; font-weight:700; font-size: clamp(1.6rem, 1.2rem + 1vw, 2.6rem);} 
-.slide ul{max-width: 1100px; margin:0; padding-left:1.25rem}
+.slide h2{font-family: ui-serif, Georgia, 'Times New Roman', Times, serif; font-weight:700; font-size: clamp(1.6rem, 1.2rem + 1vw, 2.6rem);}
+/* Заголовок на слайдах с slide-row - оставляем на месте */
+.slide:has(.slide-row) > h2 {
+  margin-bottom: 0.5rem; /* небольшой отступ снизу перед контентом */
+} 
+.slide ul{max-width: 1100px; margin:0 auto; padding-left:1.25rem}
 .slide li{margin:.35rem 0;}
+
 .slide code{
   background: rgba(0,0,0,.035);
   padding:.1rem .35rem; border-radius:.35rem; color:#0f172a
@@ -98,6 +114,23 @@ body{
 .hero .tagline{margin-top:1.25rem; letter-spacing:.18em; text-transform:uppercase; font-size:clamp(.8rem, .5rem + .5vw, 1rem); color:#111}
 .credits{position:absolute; left:0; right:0; bottom:2.25rem; text-align:center; color:#6b7280; font-weight:600}
 .credits small{display:block; letter-spacing:.18em}
+
+/* Footer on every slide (except hero) to match the deck look in screen + print */
+.slide::after{
+  content: "TRADING AI · Vladyslav Shudiehov";
+  white-space: pre;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 1.3rem;
+  text-align: center;
+  color: #6b7280;
+  font-weight: 600;
+  letter-spacing: .18em;
+  font-size: clamp(.7rem, .6rem + .2vw, .85rem);
+  pointer-events: none;
+}
+.slide.hero::after{content:none;}
 
 /* Poznámky a závery */
 .note{color: var(--muted); font-style: italic; margin-top:1rem}
@@ -144,13 +177,19 @@ body{
     background: #ffffff; /* let backgrounds on slides render clean */
   }
   /* Page size to match 16:9 slides for best fidelity */
-  @page{ size: 1280px 720px; margin: 0; }
+  @page{ 
+    size: 1280px 720px; 
+    margin: 0; 
+  }
 
   /* Hide UI chrome */
   .topbar, .pager{ display:none !important; }
 
   /* Make deck flow vertically without snapping/overflow */
-  .deck{ height:auto !important; overflow: visible !important; }
+  .deck{ 
+    height:auto !important; 
+    overflow: visible !important; 
+  }
 
   /* Each slide becomes one page; prevent splitting */
   .slide{
@@ -158,11 +197,11 @@ body{
     width: 1280px;
     height: 720px;
     margin: 0 auto;
-    padding: 2.5rem; /* inner safe area */
+    padding: 2.5rem 2.5rem 4.25rem; /* inner safe area + footer room */
     display: flex;
     flex-direction: column;
     justify-content: center;
-    align-items: center;
+    align-items: stretch; /* allow rows to take full width */
     min-height: auto !important;
     break-inside: avoid;
     page-break-inside: avoid;
@@ -173,31 +212,142 @@ body{
       radial-gradient(1000px 600px at 15% 25%, rgba(0,0,0,.02), transparent 60%),
       linear-gradient(180deg, transparent, rgba(0,0,0,.015));
     color: var(--text);
+    position: relative; /* для футера */
   }
   .slide:last-child{ break-after: auto; page-break-after: auto; }
 
-  /* Adjust absolute elements for print */
-  .credits{ position: static; margin-top: 1.25rem; }
+  /* Футер на каждом слайде при печати */
+  .slide::after{
+    content: "TRADING AI · Vladyslav Shudiehov";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 1.3rem;
+    text-align: center;
+    color: #6b7280;
+    font-weight: 600;
+    letter-spacing: .18em;
+    font-size: 0.75rem;
+    pointer-events: none;
+    white-space: normal;
+  }
+  .slide.hero::after{content:none;}
+
+  /* Keep the title-slide credits pinned to bottom like on screen */
+  .slide.hero .credits{ position:absolute; left:0; right:0; bottom:2.25rem; margin:0; }
+
+  /* Заголовок на слайдах с slide-row при печати */
+  .slide:has(.slide-row) > h2 {
+    margin-bottom: 0.5rem !important;
+    margin-top: 0 !important;
+  }
+
+  /* Preserve the "text left + image right" layout on print */
+  .slide-row{
+    display: flex !important;
+    flex-direction: row !important;
+    width: 100%;
+    max-width: 1100px;
+    margin: 2.5rem auto 0 auto !important; /* отступ сверху для печати */
+    justify-content: space-between;
+    align-items: flex-start !important; /* выравнивание по верху */
+    gap: 2rem;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .slide-row > ul{ 
+    flex: 1 1 0; 
+    max-width: 55%;
+    min-width: 0;
+    margin: 0 !important;
+    margin-top: 0 !important; /* текст начинается сверху */
+    padding: 0 !important;
+    padding-top: 0 !important;
+    align-self: flex-start !important;
+  }
+  .slide-row > ul > li:first-child {
+    margin-top: 0 !important;
+  }
+  figure.slide-image-right,
+  .slide-row > img.slide-image-right{ 
+    flex: 0 0 40%; 
+    margin: 0 !important; 
+    margin-top: 1.5rem !important; /* отступ сверху для изображения - чтобы было ниже текста, как на сайте */
+    padding: 0 !important;
+    display: block !important;
+    min-width: 0;
+    max-width: 40%;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    align-self: flex-start !important;
+    background: transparent !important;
+    border: none !important;
+  }
+  img.slide-image-right{
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    max-height: 500px !important;
+    min-height: 0 !important;
+    object-fit: contain !important;
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+  }
+
+  /* Центрирование контента на слайдах без картинок при печати */
+  .slide:not(:has(.slide-row)) > * {
+    text-align: center;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .slide:not(:has(.slide-row)) > ul {
+    text-align: left;
+    display: inline-block;
+  }
+  .slide:not(:has(.slide-row)) > h2 {
+    text-align: center;
+  }
 }
 /* Общий ряд: текст слева + картинка справа */
 .slide-row {
     display: flex;
     align-items: center;
     gap: 2rem;
+    width: 100%;
+    max-width: 1100px;
+    margin: 2rem auto 0 auto; /* отступ сверху, чтобы опустить контент ниже заголовка */
+    justify-content: space-between;
 }
 
 /* Список растягиваем, чтобы он занимал левую часть */
-#slide-7 ul {
-    flex: 1;
-}
+.slide-row > ul { flex: 1 1 0; }
 
 /* Картинка справа */
-.slide-image-right {
+figure.slide-image-right{ 
+  flex: 0 0 35%; 
+  margin: 0; 
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+img.slide-image-right{
     flex: 0 0 35%;        /* ширина примерно 35% слайда */
     max-height: 60vh;     /* не дать ей стать слишком высокой */
+    width: 100%;
+    height: auto;
+    display: block;
     object-fit: contain;
-    border-radius: 12px;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+    border-radius: 0;
+    box-shadow: none;
+    background: transparent;
 }
 
 /* На мобильных — стекаем вертикально */
@@ -207,7 +357,7 @@ body{
         align-items: flex-start;
     }
 
-    .slide-image-right {
+    img.slide-image-right {
         width: 100%;
         max-width: 480px;
     }
