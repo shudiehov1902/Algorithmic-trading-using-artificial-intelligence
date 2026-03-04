@@ -298,7 +298,6 @@ body{
     background: transparent !important;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
-    image-rendering: -webkit-optimize-contrast;
     image-rendering: crisp-edges;
   }
 
@@ -365,4 +364,15 @@ img.slide-image-right{
 .formula {
     margin: 0.3rem 0 0.8rem 1.8rem; /* отступ слева, чтобы формула была под буллетом */
     font-size: 1.3rem;              /* чуть больше шрифт, чем текст */
+}
+
+/* Центрируем slide-row, если внутри НЕТ правого изображения */
+.slide-row:not(:has(.slide-image-right)) {
+  justify-content: center;
+}
+
+.slide-row:not(:has(.slide-image-right)) > ul,
+.slide-row:not(:has(.slide-image-right)) > .slide-text {
+  max-width: 1100px;
+  width: 100%;
 }

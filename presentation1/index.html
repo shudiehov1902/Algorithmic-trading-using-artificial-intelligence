@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="sk">
+<html lang="sk" xmlns="http://www.w3.org/1999/html">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -20,20 +20,23 @@
       <span class="brand-title">Obchodovanie s AI</span>
       <span class="brand-sub">Sharpe/Sortino ako loss</span>
     </div>
-    <nav class="quicknav" aria-label="Rýchla navigácia">
-      <a href="#slide-1" title="Titulný slide">1</a>
-      <a href="#slide-2" title="Motivácia">2</a>
-      <a href="#slide-3" title="Cieľ práce">3</a>
-      <a href="#slide-4" title="Metodika: pipeline">4</a>
-      <a href="#slide-5" title="Dáta">5</a>
-      <a href="#slide-6" title="výnosy + lagy">6</a>
-        <a href="#slide-7" title="predikcie">7</a>
-        <a href="#slide-8" title="výber">8</a>
-        <a href="#slide-9" title="výber2">9</a>
-        <a href="#slide-10" title="Súhrn">10</a>
-      <a href="#slide-11" title="Plan">11</a>
-
-    </nav>
+   <nav class="quicknav" aria-label="Rýchla navigácia">
+  <a href="#slide-1"  title="Využitie rizikovo vážených ukazovateľov v procese učenia modelov pre algoritmické obchodovanie">1</a>
+  <a href="#slide-2"  title="Motivácia: prečo Sharpe/Sortino ako loss">2</a>
+  <a href="#slide-3"  title="Ciele a definícia „lepšieho“ modelu">3</a>
+  <a href="#slide-4"  title="Čo je implementované">4</a>
+  <a href="#slide-5"  title="Metodika: pipeline (dáta → model → portfólio → metriky)">5</a>
+  <a href="#slide-6"  title="Dáta: kryptomeny (Binance) + akcie (US)">6</a>
+  <a href="#slide-7"  title="Ako rátam výnosy + lagy">7</a>
+  <a href="#slide-8"  title="Baseline: MLP, LSTM, StockMixer">8</a>
+  <a href="#slide-9"  title="Ako vyberám stratégiu: Top-K, rebalance, buffer">9</a>
+  <a href="#slide-10" title="Backtest metriky: Market vs NET (s nákladmi)">10</a>
+  <a href="#slide-11" title="Loss: Sharpe vs Sortino (na okne N dní)">11</a>
+  <a href="#slide-12" title="Ako hodnotím predikcie: ranking → portfólio → výnos">12</a>
+  <a href="#slide-13" title="Turnover, náklady, NET Cum a Excess wealth">13</a>
+  <a href="#slide-14" title="Alpha IR a robust výber parametrov">14</a>
+       <a href="#slide-15" title="Súhrn výsledkov">15</a>
+</nav>
     <div class="actions" aria-label="Export">
       <button class="download-btn" id="downloadPdf" type="button" title="Uložiť ako PDF">PDF</button>
       <button class="download-btn" id="downloadPptx" type="button" title="Stiahnuť PPTX">PPTX</button>
@@ -44,10 +47,8 @@
   <main class="deck" role="main">
     <!-- Slide 1 -->
     <section class="slide hero" id="slide-1" aria-labelledby="s1-title">
-      <h1 id="s1-title">Obchodovanie s pomocou umelej inteligencie</h1>
-        <h2 class="hero-subtitle">
-            Optimalizácia obchodnej stratégie: <strong>Sharpe/Sortino ratio ako loss funkcia</strong>
-    </h2>
+      <h1 id="s1-title">Využitie rizikovo vážených ukazovateľov v procese učenia modelov pre algoritmické obchodovanie</h1>
+
 
       <div class="subtitle">
           <div class="hero-org">Bakalárska práca</div>
@@ -103,45 +104,50 @@
 
       <!-- Slide 3 -->
       <section class="slide" id="slide-3" aria-labelledby="s3-title">
-          <h2 id="s3-title">Cieľ práce a výskumné otázky</h2>
+
+    <h2 id="s3-title">Ciele a definícia „lepšieho“ modelu</h2>
 
 
+      <h3>Ciele práce</h3>
+      <ul>
+        <li><strong>Cieľ:</strong> navrhnúť a otestovať tréning modelov pre algoritmické obchodovanie s využitím
+          <strong>rizikovo vážených ukazovateľov</strong> (Sharpe/Sortino).</li>
+        <li><strong>Porovnávam prístupy:</strong> baseline tréning (<strong>MSE/MAE</strong>) vs. tréning priamo na cieľovej metrike
+          (<strong>−Sharpe / −Sortino loss</strong>).</li>
+        <li><strong>Dôležité:</strong> hodnotím <strong>NET výkon</strong> (po transakčných nákladoch), nie iba predikčnú chybu.</li>
+      </ul>
 
-                  <h3>Hlavný cieľ:</h3>
-                  <ul>
-                      <li>
-                          Navrhnúť a otestovať <strong>Sharpe/Sortino ratio ako loss funkciu</strong>
-                          pre tréning neurónových sietí v úlohe predikcie/rankingu akcií.
-                      </li>
-                      <li>
-                          Porovnať s baseline loss funkciami: <strong>MSE</strong> a <strong>MAE</strong>.
-                      </li>
-                      <li>
-                          Vyhodnotiť cez <strong>portfóliový backtest (GROSS aj NET)</strong>
-                          vrátane nákladov a turnoveru.
-                      </li>
-                  </ul>
+    <div class="card">
+      <h3>Definícia „lepšieho“ modelu</h3>
+      <ul>
+        <li><strong>Hlavné kritérium:</strong> <strong>robust Val NET Sortino</strong> (stabilný výber hyperparametrov).</li>
+        <li><strong>Doplnkové metriky (report):</strong>
+          NET Sharpe, Alpha IR (NET), NET CumReturn, Avg turnover.</li>
+      </ul>
 
-                  <h3>Výskumné otázky:</h3>
-                  <ul>
-                      <li>Zlepší Sharpe/Sortino-loss <strong>NET Sharpe / NET Sortino / Alpha IR</strong> oproti MSE/MAE?</li>
-                      <li>Ktorá architektúra (MLP / LSTM / StockMixer) najlepšie využije tento loss?</li>
-                      <li>Ako citlivé sú výsledky na <strong>náklady</strong>?</li>
-                  </ul>
-
-
-
-                  <div class="conclusion">
-                      <strong>Hypotéza:</strong> optimalizácia Sharpe/Sortino ako loss vedie
-                      k lepšiemu trading výkonu než optimalizácia MSE/MAE.
-                  </div>
-
-      </section>
-
-
-      <!-- Slide 4 -->
+    </div>
+</section>
+    <!-- Slide 4 -->
       <section class="slide" id="slide-4" aria-labelledby="s4-title">
-          <h2 id="s4-title">Metodika: pipeline (dáta → model → portfólio → metriky)</h2>
+    <h2 id="s4-title">Čo je implementované</h2>
+
+      <h3>Modely</h3>
+      <ul>
+        <li><strong>MLP:</strong> baseline (MSE/MAE) + Sharpe/Sortino-loss <span class="badge ok">✅</span></li>
+        <li><strong>LSTM:</strong> baseline (MSE/MAE) + Sharpe/Sortino-loss <span class="badge ok">✅</span></li>
+        <li><strong>StockMixer:</strong> baseline <span class="badge ok">✅</span>, Sharpe/Sortino-loss <span class="badge todo">⏳</span></li>
+      </ul>
+
+      <p class="note">
+        Sharpe/Sortino-loss je implementovaný tak, aby optimalizoval portfóliové metriky (risk-adjusted výkon).
+      </p>
+
+</section>
+
+
+      <!-- Slide 5 -->
+      <section class="slide" id="slide-5" aria-labelledby="s5-title">
+          <h2 id="s5-title">Metodika: pipeline (dáta → model → portfólio → metriky)</h2>
 
 
           <table class="compare" aria-label="Pipeline">
@@ -150,7 +156,7 @@
                   <th>1) Dáta</th>
                   <th>2) Model + tréning</th>
                   <th>3) Portfólio</th>
-                  <th>4) Metiky</th>
+                  <th>4) Metriky</th>
               </tr>
               </thead>
               <tbody>
@@ -164,7 +170,7 @@
                   <td>
                       MLP / LSTM / StockMixer<br/>
                       baseline: MSE/MAE<br/>
-                      <strong>cieľ:</strong> Sharpe/Sortino loss
+                      Sharpe/Sortino loss
                   </td>
                   <td>
                       long-only top-K<br/>
@@ -173,6 +179,7 @@
                       turnover → cost
                   </td>
                   <td>
+                      NET vs GROSS (cost, turnover)<br/>
                       Sharpe / Sortino<br/>
                       Alpha IR vs market<br/>
                       Cum return<br/>
@@ -190,9 +197,9 @@
       </section>
 
 
-    <!-- Slide 5 -->
-      <section class="slide" id="slide-5" aria-labelledby="s5-title">
-          <h2 id="s5-title">Dáta</h2>
+    <!-- Slide 6 -->
+      <section class="slide" id="slide-6" aria-labelledby="s6-title">
+          <h2 id="s6-title">Dáta</h2>
 
           <div class="slide-row">
               <ul>
@@ -215,9 +222,9 @@
           </div>
       </section>
 
-      <!-- Slide 6 -->
-      <section class="slide" id="slide-6" aria-labelledby="s6-title">
-          <h2 id="s6-title">Predspracovanie dát: výnosy + lagy</h2>
+      <!-- Slide 7 -->
+      <section class="slide" id="slide-7" aria-labelledby="s7-title">
+          <h2 id="s7-title">Predspracovanie dát: výnosy + lagy</h2>
 
           <div class="slide-row">
               <ul>
@@ -267,9 +274,139 @@
           </div>
 
       </section>
-      <!-- Slide 7  -->
-      <section class="slide" id="slide-7" aria-labelledby="s7-title">
-          <h2 id="s7-title">Ako hodnotím predikcie: ranking → portfólio → výnos</h2>
+
+
+      <section class="slide" id="slide-8" aria-labelledby="s8-title">
+
+    <h2 id="s8-title">Predspracovanie dát pre Sharpe/Sortino loss</h2>
+
+
+
+          <div class="slide-row">
+
+
+
+
+              <ul>
+                  <h3> Čo tvorí jeden deň (cross-section)</h3>
+                <li>Pre každý deň <strong>t</strong> mám maticu: <strong>všetky tickery × 10 lagov</strong>.</li>
+                <li>Riadok = 1 ticker, stĺpce = <code>lag1 … lag10</code>.</li>
+                <li><strong>ret_i(t)</strong> = realizovaný denný výnos tickera.</li>
+
+
+
+              <p class="note">
+                Na rozdiel od baseline tu vždy potrebujem celý cross-section v daný deň.
+              </p>
+                  </ul>
+
+
+                   <img src="Sharpe_sortino%20den.drawio.png"
+                           alt="jeden deň"
+                           class="slide-image-right">
+          </div>
+
+</section>
+
+<section class="slide" id="slide-9" aria-labelledby="s9-title">
+  <h2 id="s9-title">Predspracovanie dát pre Sharpe/Sortino loss</h2>
+
+  <div class="slide-row">
+    <div class="slide-text">
+      <h3>Ako sa skladá batch (okno N dní)</h3>
+
+      <ul>
+        <li><strong>Batch = okno N dní</strong> (<code>days_per_batch</code>).</li>
+        <li>Pre každý deň v okne: použijem všetky tickery → získam <strong>rp(t)</strong>.</li>
+        <li>Sharpe/Sortino sa počíta z celej série: <strong>{rp(t), …, rp(t+N−1)}</strong>.</li>
+      </ul>
+
+
+      <div class="conclusion">
+        <strong>Zhrnutie:</strong> príznaky (lagy) sú rovnaké ako pri baseline, rozdiel je v batchovaní podľa dní:
+        optimalizujem portfóliovú metriku zo série <strong>rp(t)</strong>, nie chybu jednej predikcie.
+      </div>
+    </div>
+
+    <img
+      src="batch.drawio.png"
+      alt="Batch: okno N dní → rp(t)"
+      class="slide-image-right"
+    />
+  </div>
+</section>
+
+<section class="slide" id="slide-10" aria-labelledby="s10">
+  <h2 id="s10">Portfólio zo skóre (scores → weights → rp(t))</h2>
+
+  <div class="slide-row">
+    <ul>
+      <li>
+        Model pre každý ticker <strong>i</strong> v deň <strong>t</strong> vypočíta skóre:
+        <div class="formula">\( score_{i,t} = f_\theta(X_{i,t}) \)</div>
+        <div class="note">
+          <strong>Skóre</strong> je ranking signál (ľubovoľná reálna hodnota, napr. -0.3, 0.7, 2.1).
+          Dôležité je poradie medzi tickermi, nie jednotky.
+        </div>
+      </li>
+
+      <li>
+        Skóre premením na <strong>váhy portfólia</strong> v rámci jedného dňa (cross-section):
+           <ul>
+                <strong>soft</strong> váhy pre tréning: váhy počítam cez <strong>softmax</strong> zo skóre (s teplotou \(\tau\)); \(\sum_i w_{i,t}=1\).
+           </ul>
+      </li>
+
+      <li>
+        Denný výnos portfólia:
+        <div class="formula">\( rp(t) = \sum_i (w_{i,t}\cdot ret_i(t) \))</div>
+      </li>
+
+
+
+    </ul>
+
+    <!-- voliteľne môžeš dať obrázok/ikonu napravo -->
+    <!-- <img src="..." alt="portfolio from scores" class="slide-image-right"> -->
+  </div>
+
+
+</section>
+
+      <section class="slide" id="slide-11" aria-labelledby="s11-title">
+          <h2 id="s11-title">Loss: Sharpe vs Sortino (na okne N dní)</h2>
+
+          <div class="slide-row">
+            <ul>
+              <li><strong>Sharpe</strong>: penalizuje volatilitu na obe strany (std).</li>
+              <li><strong>Sortino</strong>: penalizuje hlavne downside (len záporné výkyvy).</li>
+              <li><strong>Optimalizácia</strong>: počítam metriku na sérii portfóliových výnosov
+                <strong>\(\{rp(t),\dots,rp(t+N-1)\}\)</strong>.
+                  <div class="formula">
+                  \[
+                  \begin{aligned}
+                    \mathcal{L} &= -\,\mathrm{Sharpe}\!\left(\{rp(t),\ldots,rp(t+N-1)\}\right) \\
+                                &\text{alebo} \\
+                    \mathcal{L} &= -\,\mathrm{Sortino}\!\left(\{rp(t),\ldots,rp(t+N-1)\}\right)
+                  \end{aligned}
+                  \]
+                </div>
+              </li>
+
+
+
+                <div class="conclusion">
+                  <strong>Pointa:</strong> netrénujem “presnú predikciu výnosu”, ale priamo maximalizujem portfóliovú metriku na okne dní.
+                </div>
+            </ul>
+          </div>
+</section>
+
+
+
+      <!-- Slide 13 -->
+      <section class="slide" id="slide-12" aria-labelledby="s12-title">
+          <h2 id="s12-title">Ako hodnotím predikcie: ranking → portfólio → výnos</h2>
 
           <ul>
               <li>
@@ -307,10 +444,10 @@
       </section>
 
 
-      <!-- Slide 8  -->
+      <!-- Slide 13 -->
 
-      <section class="slide" id="slide-8" aria-labelledby="s8-title">
-          <h2 id="s8-title">Turnover, náklady, NET Cum a Excess wealth</h2>
+      <section class="slide" id="slide-13" aria-labelledby="s13-title">
+          <h2 id="s13-title">Turnover, náklady, NET Cum a Excess wealth</h2>
 
           <ul>
               <li>
@@ -341,9 +478,9 @@
           </div>
       </section>
 
-      <!-- Slide 10 -->
-      <section class="slide" id="slide-9" aria-labelledby="s9-title">
-          <h2 id="s9-title">Alpha IR a robust výber parametrov</h2>
+      <!-- Slide 14 -->
+      <section class="slide" id="slide-14" aria-labelledby="s14-title">
+          <h2 id="s14-title">Alpha IR a robust výber parametrov</h2>
 
           <ul>
               <li>
@@ -371,117 +508,137 @@
           </div>
       </section>
 
-      <!-- Slide 9 -->
-      <section class="slide" id="slide-10" aria-labelledby="s10-title">
-          <h2 id="s10-title">Súhrn baseline výsledkov (MSE vs MAE)</h2>
+      <!-- Slide 15 -->
+      <section class="slide" id="slide-15" aria-labelledby="s15-title">
+  <h2 id="s15-title">Súhrn výsledkov (TEST, NET, cost=10 bps)</h2>
 
-          <p class="note">
-              Všetko je hodnotené na TEST: rovnaké dáta, rovnaký backtest, NET výsledky s nákladmi 10 bps.
-          </p>
+  <ul>
+    <li><strong>Hlavný výber:</strong> robust Val <code>NET Sortino</code> (min z dvoch polovíc Val).</li>
+  </ul>
 
-          <table class="compare" aria-label="Baseline summary (both losses)">
-              <thead>
-              <tr>
-                  <th>Model</th>
-                  <th>Loss</th>
-                  <th>Best (K,reb,buf)</th>
-                  <th>NET Sharpe</th>
-                  <th>NET Sortino</th>
-                  <th>Alpha IR (NET)</th>
-                  <th>NET Cum</th>
-                  <th>Excess wealth (NET)</th>
-              </tr>
-              </thead>
+<table class="compare" aria-label="Summary results table">
+  <thead>
+    <tr>
+      <th>Model</th>
+      <th>Objective</th>
+      <th>Params (K, reb, buf)</th>
+      <th>NET Sharpe</th>
+      <th>NET Sortino</th>
+      <th>Alpha IR (NET)</th>
+      <th>NET Cum</th>
+      <th>Avg turnover</th>
+    </tr>
+  </thead>
+  <tbody>
+    <!-- LSTM -->
+    <tr>
+      <td><strong>LSTM</strong></td>
+      <td>Sharpe-loss</td>
+      <td>(5, 10, 20)</td>
+      <td>1.096</td>
+      <td>1.600</td>
+      <td>0.862</td>
+      <td>0.847</td>
+      <td>0.076</td>
+    </tr>
+    <tr>
+      <td><strong>LSTM</strong></td>
+      <td>Sortino-loss</td>
+      <td>(5, 10, 0)</td>
+      <td>0.997</td>
+      <td>1.492</td>
+      <td>0.632</td>
+      <td>0.597</td>
+      <td>0.090</td>
+    </tr>
+    <tr>
+      <td><strong>LSTM</strong></td>
+      <td>Baseline (MAE)</td>
+      <td>(5, 10, 0)</td>
+      <td>1.073</td>
+      <td>1.452</td>
+      <td>0.865</td>
+      <td>0.828</td>
+      <td>0.094</td>
+    </tr>
+    <tr>
+      <td><strong>LSTM</strong></td>
+      <td>Baseline (MSE)</td>
+      <td>(5, 10, 40)</td>
+      <td>0.733</td>
+      <td>1.013</td>
+      <td>0.432</td>
+      <td>0.466</td>
+      <td>0.077</td>
+    </tr>
 
-              <tbody>
-              <tr class="group">
-                  <td rowspan="2">MLP</td>
-                  <td>MSE</td>
-                  <td>(10, 10, 20)</td>
-                  <td><b>1.278</b></td>
-                  <td><b>1.724</b></td>
-                  <td><b>0.837</b></td>
-                  <td><b>47.8%</b></td>
-                  <td><b>17.7%</b></td>
-              </tr>
-              <tr>
-                  <td>MAE</td>
-                  <td>(5, 10, 40)</td>
-                  <td>1.051</td>
-                  <td>1.211</td>
-                  <td>0.445</td>
-                  <td>41.3%</td>
-                  <td>11.1%</td>
-              </tr>
+    <!-- MLP -->
+    <tr>
+      <td><strong>MLP</strong></td>
+      <td>Sharpe-loss</td>
+      <td>(10, 10, 40)</td>
+      <td>1.214</td>
+      <td>1.575</td>
+      <td>0.599</td>
+      <td>0.425</td>
+      <td>0.089</td>
+    </tr>
+    <tr>
+      <td><strong>MLP</strong></td>
+      <td>Sortino-loss</td>
+      <td>(5, 10, 0)</td>
+      <td>0.948</td>
+      <td>1.377</td>
+      <td>0.322</td>
+      <td>0.379</td>
+      <td>0.098</td>
+    </tr>
+    <tr>
+      <td><strong>MLP</strong></td>
+      <td>Baseline (MAE)</td>
+      <td>(5, 10, 20)</td>
+      <td>0.644</td>
+      <td>0.834</td>
+      <td>0.315</td>
+      <td>0.373</td>
+      <td>0.085</td>
+    </tr>
+    <tr>
+      <td><strong>MLP</strong></td>
+      <td>Baseline (MSE)</td>
+      <td>(5, 10, 20)</td>
+      <td>0.310</td>
+      <td>0.437</td>
+      <td>-0.094</td>
+      <td>0.080</td>
+      <td>0.088</td>
+    </tr>
 
-              <tr class="group">
-                  <td rowspan="2">LSTM</td>
-                  <td>MSE</td>
-                  <td>(5, 10, 10)</td>
-                  <td>0.661</td>
-                  <td>1.019</td>
-                  <td>-0.140</td>
-                  <td>23.5%</td>
-                  <td>-6.6%</td>
-              </tr>
-              <tr>
-                  <td><b>MAE</b></td>
-                  <td><b>(10, 10, 40)</b></td>
-                  <td><b>1.390</b></td>
-                  <td><b>2.109</b></td>
-                  <td><b>0.965</b></td>
-                  <td><b>51.8%</b></td>
-                  <td><b>21.7%</b></td>
-              </tr>
-
-              <tr class="group">
-                  <td rowspan="2">StockMixer</td>
-                  <td><b>MSE</b></td>
-                  <td><b>(5, 10, 10)</b></td>
-                  <td><b>1.609</b></td>
-                  <td><b>2.384</b></td>
-                  <td><b>1.344</b></td>
-                  <td><b>77.8%</b></td>
-                  <td><b>47.7%</b></td>
-              </tr>
-              <tr>
-                  <td>MAE</td>
-                  <td>(5, 10, 40)</td>
-                  <td>0.988</td>
-                  <td>1.300</td>
-                  <td>0.377</td>
-                  <td>39.6%</td>
-                  <td>9.5%</td>
-              </tr>
-              </tbody>
-          </table>
-
-
+    <!-- StockMixer (unchanged) -->
+    <tr>
+      <td><strong>StockMixer</strong></td>
+      <td>Baseline (MSE)</td>
+      <td>(40, 10, 40)</td>
+      <td>1.063</td>
+      <td>1.285</td>
+      <td>0.791</td>
+      <td>0.499</td>
+      <td>0.076</td>
+    </tr>
+    <tr>
+      <td><strong>StockMixer</strong></td>
+      <td>Baseline (MAE)</td>
+      <td>(10, 10, 0)</td>
+      <td>0.700</td>
+      <td>0.934</td>
+      <td>0.302</td>
+      <td>0.363</td>
+      <td>0.091</td>
+    </tr>
+  </tbody>
+</table>
       </section>
-      <!-- Slide 11 -->
-      <section class="slide" id="slide-11" aria-labelledby="s11-title">
-          <h2 id="s11-title">Čo budem robiť v 2. semestri?</h2>
-
-          <h3>1) Sharpe / Sortino ako loss</h3>
-          <ul>
-              <li><b>Loss = risk-adjusted výkon portfólia</b> (nie MSE/MAE).</li>
-              <li>
-                  <div class="formula">
-                      \( \mathcal{L}_{Sharpe} = - \dfrac{\mathbb{E}[r_p]}{\sigma(r_p)} \), &nbsp;
-                      \( \mathcal{L}_{Sortino} = - \dfrac{\mathbb{E}[r_p]}{\sigma_-(r_p)} \)
-                  </div>
-              </li>
-              <li><b>Náklady + stabilita:</b> turnover (NET) + robustnosť.</li>
-          </ul>
-
-          <h3>2) Evaluácia</h3>
-          <ul>
-              <li><b>Porovnanie:</b> Sharpe/Sortino-loss vs MSE/MAE (MLP/LSTM/StockMixer).</li>
-              <li><b>Walk-forward:</b> rolling okná (train → next test), viac období.</li>
-          </ul>
-      </section>
-
-
+      <!-- Slide 17 -->
   </main>
 
   <!-- Plávajúce tlačidlá na rýchly pohyb medzi slidmi -->

@@ -1,8 +1,25 @@
-import copy
+"""MLP (MAE) + portfolio selection with turnover-aware validation.
+
+Fixes vs older mlp_mae_2.py:
+- Adds CLI args (seed, batch sizes, grids, cost model).
+- Deterministic seeding for torch/numpy/random + DataLoader generator.
+- Validation selection supports different selection metrics (net_sortino, net_sharpe, net_alpha_ir).
+- Turnover-aware selection: either a hard max_avg_turnover constraint, or a soft penalty.
+
+Typical usage:
+  python3 mlp_mae_2_fixed.py --charge_entry_cost --cost_bps 10 --select_metric net_sortino \
+    --grid_reb 5,10,20 --grid_buf 20,40 --grid_K 10,20,40,50 --max_avg_turnover 0.12
+
+If you omit --max_avg_turnover, use --turnover_penalty (soft penalty) to bias towards lower turnover.
+"""
+
+from __future__ import annotations
+
+import argparse
 import math
 import random
 from dataclasses import dataclass
-from typing import Tuple, List, Dict, Set, Optional
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -11,44 +28,67 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
 
-# =====================================================
-# 0) Reproducibility
-# =====================================================
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def set_global_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
-# =====================================================
-# 1) Load prepared dataset
-# =====================================================
-X_train = np.load("data/X_train.npy")
-y_train = np.load("data/y_train.npy")
-X_val = np.load("data/X_val.npy")
-y_val = np.load("data/y_val.npy")
-X_test = np.load("data/X_test.npy")
-y_test = np.load("data/y_test.npy")
-
-val_dates = np.load("data/val_dates.npy", allow_pickle=True)
-val_tickers = np.load("data/val_tickers.npy", allow_pickle=True)
-test_dates = np.load("data/test_dates.npy", allow_pickle=True)
-test_tickers = np.load("data/test_tickers.npy", allow_pickle=True)
-
-print("Shapes:")
-print("X_train:", X_train.shape, "y_train:", y_train.shape)
-print("X_val:  ", X_val.shape, "y_val:  ", y_val.shape)
-print("X_test: ", X_test.shape, "y_test:", y_test.shape)
-
-input_dim = X_train.shape[1]  # 10 lags
+def parse_int_list(s: str) -> List[int]:
+    s = s.strip()
+    if not s:
+        return []
+    return [int(x.strip()) for x in s.split(",") if x.strip()]
 
 
-# =====================================================
-# 2) Dataset for MLP: (N, 10) -> tensor (N, 10)
-# =====================================================
+def safe_std(x: np.ndarray) -> float:
+    x = np.asarray(x, dtype=float)
+    if x.size < 2:
+        return 0.0
+    return float(x.std(ddof=1))
+
+
+def sharpe(daily: np.ndarray, ann: int = 252) -> float:
+    daily = np.asarray(daily, dtype=float)
+    mu = float(daily.mean())
+    sd = safe_std(daily)
+    if sd <= 1e-12:
+        return 0.0
+    return (mu / sd) * math.sqrt(ann)
+
+
+def sortino(daily: np.ndarray, ann: int = 252) -> float:
+    daily = np.asarray(daily, dtype=float)
+    mu = float(daily.mean())
+    downside = daily[daily < 0.0]
+    dd = safe_std(downside) if downside.size > 1 else 0.0
+    if dd <= 1e-12:
+        return 0.0
+    return (mu / dd) * math.sqrt(ann)
+
+
+def alpha_ir(net: np.ndarray, mkt: np.ndarray, ann: int = 252) -> float:
+    net = np.asarray(net, dtype=float)
+    mkt = np.asarray(mkt, dtype=float)
+    a = net - mkt
+    mu = float(a.mean())
+    sd = safe_std(a)
+    if sd <= 1e-12:
+        return 0.0
+    return (mu / sd) * math.sqrt(ann)
+
+
+# -----------------------------
+# Dataset
+# -----------------------------
+
 class TabularDataset(Dataset):
     def __init__(self, X: np.ndarray, y: np.ndarray):
         self.X = torch.from_numpy(X).float()               # (N, D)
@@ -61,36 +101,14 @@ class TabularDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-train_ds = TabularDataset(X_train, y_train)
-val_ds = TabularDataset(X_val, y_val)
-test_ds = TabularDataset(X_test, y_test)
+# -----------------------------
+# Model
+# -----------------------------
 
-train_loader = DataLoader(train_ds, batch_size=256, shuffle=True)
-val_loader = DataLoader(val_ds, batch_size=512, shuffle=False)
-test_loader = DataLoader(test_ds, batch_size=512, shuffle=False)
-
-
-# =====================================================
-# 3) Search / trading config (GRID)
-# =====================================================
-TOPK_GRID: List[int] = [5, 10, 20, 30, 40, 50, 75, 100]
-REBALANCE_GRID: List[int] = [1, 5, 10]        # daily / weekly / bi-weekly
-BUFFER_GRID: List[int] = [0, 10, 20, 40]      # hysteresis buffer
-
-COST_BPS = 10.0                               # used for selection (NET)
-CHARGE_ENTRY_COST = True
-
-VAL_SPLIT_DATE = pd.Timestamp("2023-07-01")   # robust H1/H2
-EVAL_EVERY_EPOCH = 5                          # grid-search frequency
-
-
-# =====================================================
-# 4) MLP model
-# =====================================================
 class MLP(nn.Module):
     def __init__(self, input_dim: int, hidden: int = 256, depth: int = 3, dropout: float = 0.1):
         super().__init__()
-        layers = []
+        layers: List[nn.Module] = []
         d = input_dim
         for _ in range(depth):
             layers.append(nn.Linear(d, hidden))
@@ -104,399 +122,408 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
+# -----------------------------
+# Trading/backtest
+# -----------------------------
 
-model = MLP(input_dim=input_dim, hidden=256, depth=3, dropout=0.1).to(device)
-
-# ---- Train loss: MAE (L1). For Huber use: nn.SmoothL1Loss(beta=0.01)
-criterion_train = nn.L1Loss()
-
-# ---- Metrics
-criterion_mse = nn.MSELoss()
-criterion_mae = nn.L1Loss()
-
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+@dataclass(frozen=True)
+class Policy:
+    K: int
+    rebalance_every: int
+    buffer: int
 
 
-# =====================================================
-# 5) Training / prediction helpers
-# =====================================================
-def run_train_epoch(dataloader, model, optimizer) -> float:
-    model.train()
-    total = 0.0
-    n = 0
-    for Xb, yb in dataloader:
-        Xb = Xb.to(device)
-        yb = yb.to(device)
-
-        optimizer.zero_grad()
-        pred = model(Xb)
-        loss = criterion_train(pred, yb)
-        loss.backward()
-        optimizer.step()
-
-        bs = Xb.size(0)
-        total += loss.item() * bs
-        n += bs
-    return total / n
+def build_df(pred: np.ndarray, y: np.ndarray, dates: np.ndarray, tickers: np.ndarray) -> pd.DataFrame:
+    df = pd.DataFrame({
+        "date": pd.to_datetime(dates),
+        "ticker": tickers.astype(str),
+        "pred": pred.astype(float),
+        "ret": y.astype(float),
+    })
+    # In case of duplicates, keep stable ordering
+    df = df.sort_values(["date", "ticker"], kind="mergesort").reset_index(drop=True)
+    return df
 
 
-def evaluate(dataloader, model) -> Tuple[float, float]:
-    model.eval()
-    mse_total = 0.0
-    mae_total = 0.0
-    n = 0
-    with torch.no_grad():
-        for Xb, yb in dataloader:
-            Xb = Xb.to(device)
-            yb = yb.to(device)
-            pred = model(Xb)
-            mse_total += criterion_mse(pred, yb).item() * Xb.size(0)
-            mae_total += criterion_mae(pred, yb).item() * Xb.size(0)
-            n += Xb.size(0)
-    return mse_total / n, mae_total / n
-
-
-def get_predictions_np(dataloader, model) -> Tuple[np.ndarray, np.ndarray]:
-    model.eval()
-    preds = []
-    ys = []
-    with torch.no_grad():
-        for Xb, yb in dataloader:
-            Xb = Xb.to(device)
-            pred = model(Xb)
-            preds.append(pred.detach().cpu().numpy().reshape(-1))
-            ys.append(yb.detach().cpu().numpy().reshape(-1))
-    return np.concatenate(preds), np.concatenate(ys)
-
-
-# =====================================================
-# 6) Finance metrics (Sharpe / Sortino / IR / Cum)
-# =====================================================
-def sharpe_annual_series(daily_ret: pd.Series) -> float:
-    daily_ret = daily_ret.dropna()
-    if len(daily_ret) < 2:
-        return float("nan")
-    mu = float(daily_ret.mean())
-    sd = float(daily_ret.std(ddof=1))
-    return (mu / sd) * math.sqrt(252) if sd > 0 else float("nan")
-
-
-def sortino_annual_series(daily_ret: pd.Series) -> float:
-    daily_ret = daily_ret.dropna()
-    if len(daily_ret) < 2:
-        return float("nan")
-    mu = float(daily_ret.mean())
-    downside = daily_ret[daily_ret < 0.0]
-    if len(downside) < 2:
-        return float("nan")
-    dd = float(downside.std(ddof=1))
-    return (mu / dd) * math.sqrt(252) if dd > 0 else float("nan")
-
-
-def cumulative_return(daily_ret: pd.Series) -> float:
-    daily_ret = daily_ret.dropna()
-    if len(daily_ret) == 0:
-        return float("nan")
-    return float((1.0 + daily_ret).cumprod().iloc[-1] - 1.0)
-
-
-def align_two(a: pd.Series, b: pd.Series) -> Tuple[pd.Series, pd.Series]:
-    a2, b2 = a.align(b, join="inner")
-    return a2.dropna(), b2.dropna()
-
-
-def alpha_series(port_daily: pd.Series, mkt_daily: pd.Series) -> pd.Series:
-    p, m = align_two(port_daily, mkt_daily)
-    return p - m
-
-
-def info_ratio_annual(port_daily: pd.Series, mkt_daily: pd.Series) -> float:
-    a = alpha_series(port_daily, mkt_daily)
-    return sharpe_annual_series(a)
-
-
-def cumulative_excess_wealth(port_daily: pd.Series, mkt_daily: pd.Series) -> float:
-    p, m = align_two(port_daily, mkt_daily)
-    if len(p) == 0:
-        return float("nan")
-    Wp = (1.0 + p).cumprod().iloc[-1]
-    Wm = (1.0 + m).cumprod().iloc[-1]
-    return float(Wp - Wm)
-
-
-# =====================================================
-# 7) Daily cache for faster backtest/grid
-# =====================================================
-@dataclass
-class DailyCache:
-    dates: List[pd.Timestamp]
-    tickers_sorted: List[List[str]]
-    rank_maps: List[Dict[str, int]]
-    ret_maps: List[Dict[str, float]]
-    mkt_daily: pd.Series
-
-
-def build_daily_cache(df: pd.DataFrame) -> DailyCache:
-    df = df.copy()
-    df["date"] = pd.to_datetime(df["date"])
-    df["ticker"] = df["ticker"].astype(str)
-    df = df.sort_values("date")
-
-    dates: List[pd.Timestamp] = []
-    tickers_sorted: List[List[str]] = []
-    rank_maps: List[Dict[str, int]] = []
-    ret_maps: List[Dict[str, float]] = []
-
-    for d, g in df.groupby("date", sort=True):
-        g = g.sort_values("pred", ascending=False)
-        t = g["ticker"].astype(str).tolist()
-        r = g["ret"].astype(float).to_numpy()
-        dates.append(pd.Timestamp(d))
-        tickers_sorted.append(t)
-        rank_maps.append({tt: i + 1 for i, tt in enumerate(t)})
-        ret_maps.append({tt: float(rr) for tt, rr in zip(t, r)})
-
-    mkt = df.groupby("date", sort=True)["ret"].mean().sort_index()
-    return DailyCache(dates=dates, tickers_sorted=tickers_sorted, rank_maps=rank_maps, ret_maps=ret_maps, mkt_daily=mkt)
-
-
-def backtest_longonly_buffer_cost(
-    cache: DailyCache,
-    k: int,
-    rebalance_every: int,
-    buffer: int,
+def simulate_policy(
+    df: pd.DataFrame,
+    policy: Policy,
     cost_bps: float,
-    charge_entry_cost: bool = True,
-) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    holdings: Set[str] = set()
-    gross: List[float] = []
-    net: List[float] = []
-    turnover: List[float] = []
+    charge_entry_cost: bool,
+    charge_exit_cost: bool,
+) -> Tuple[pd.Series, pd.Series, float]:
+    """Return (net_daily, market_daily, avg_turnover).
 
-    for i in range(len(cache.dates)):
-        top_list = cache.tickers_sorted[i]
-        rank_map = cache.rank_maps[i]
-        ret_map = cache.ret_maps[i]
+    - market_daily = equal-weight return across all tickers per day.
+    - net_daily = strategy return after costs.
+    - avg_turnover = mean( turnover_t ) over all days, turnover_t in [0,1].
 
-        if i == 0:
-            holdings = set(top_list[:k])
-            to = 1.0 if charge_entry_cost else 0.0
-        else:
-            do_reb = (i % rebalance_every == 0)
-            if do_reb:
-                prev = holdings
+    Turnover is approximated as: 1 - overlap/|portfolio| on rebalance days, else 0.
+    """
+    cost_rate = float(cost_bps) / 1e4
 
-                kept = set()
-                thr = k + buffer
-                for t in prev:
-                    if rank_map.get(t, 10**9) <= thr:
-                        kept.add(t)
+    net_by_day: List[float] = []
+    mkt_by_day: List[float] = []
+    to_by_day: List[float] = []
 
-                new_holdings = set(kept)
-                for t in top_list:
-                    if len(new_holdings) >= k:
-                        break
-                    if t not in new_holdings:
-                        new_holdings.add(t)
+    prev_port: List[str] = []
+    port: List[str] = []
+    days = df["date"].sort_values().unique()
 
-                overlap = len(prev.intersection(new_holdings))
-                to = 1.0 - overlap / float(k)
-                holdings = new_holdings
+    for t, day in enumerate(days):
+        dday = df[df["date"] == day]
+
+        # market (equal-weight)
+        mkt_ret = float(dday["ret"].mean())
+
+        do_reb = (t % policy.rebalance_every == 0)
+        if do_reb:
+            # rank by prediction
+            ranked = dday.sort_values("pred", ascending=False, kind="mergesort")
+
+            # hysteresis buffer: keep previous names if within top K+buffer
+            if policy.buffer > 0 and prev_port:
+                top_keep = set(ranked.head(policy.K + policy.buffer)["ticker"].tolist())
+                kept = [x for x in prev_port if x in top_keep]
             else:
-                to = 0.0
+                kept = []
 
-        rr = [ret_map[t] for t in holdings if t in ret_map]
-        r_g = float(np.mean(rr)) if len(rr) > 0 else 0.0
+            need = max(0, policy.K - len(kept))
+            top_candidates = ranked[~ranked["ticker"].isin(kept)].head(need)["ticker"].tolist()
+            port = kept + top_candidates
 
-        c = to * (cost_bps / 10000.0)
-        r_n = r_g - c
+            # turnover
+            prev_set = set(prev_port)
+            cur_set = set(port)
+            overlap = len(prev_set & cur_set)
+            turnover = 1.0 - (overlap / max(1, len(cur_set)))
 
-        gross.append(r_g)
-        net.append(r_n)
-        turnover.append(to)
+            # costs
+            # entry = names newly bought; exit = names removed
+            entered = len(cur_set - prev_set)
+            exited = len(prev_set - cur_set)
+            cost = 0.0
+            if charge_entry_cost:
+                cost += entered * cost_rate
+            if charge_exit_cost:
+                cost += exited * cost_rate
 
-    idx = pd.to_datetime(cache.dates)
-    return pd.Series(gross, index=idx), pd.Series(net, index=idx), pd.Series(turnover, index=idx)
+            prev_port = port
+        else:
+            turnover = 0.0
+            cost = 0.0
 
+        if port:
+            port_ret = float(dday[dday["ticker"].isin(port)]["ret"].mean())
+        else:
+            port_ret = 0.0
 
-# =====================================================
-# 8) Training + per-epoch grid-search on VAL (objective: robust Val NET alpha IR)
-# =====================================================
-n_epochs = 50
-best_val_mae = float("inf")
+        net_ret = port_ret - cost
 
-best_score_global = -float("inf")
-best_state_dict = None
-best_params = None  # (k, rebalance, buffer)
+        net_by_day.append(net_ret)
+        mkt_by_day.append(mkt_ret)
+        to_by_day.append(turnover)
 
-
-def robust_net_alpha_ir(net_series: pd.Series, mkt_series: pd.Series) -> float:
-    net_series = net_series.dropna()
-    mkt_series = mkt_series.dropna()
-
-    net1 = net_series[net_series.index < VAL_SPLIT_DATE]
-    m1 = mkt_series[mkt_series.index < VAL_SPLIT_DATE]
-    net2 = net_series[net_series.index >= VAL_SPLIT_DATE]
-    m2 = mkt_series[mkt_series.index >= VAL_SPLIT_DATE]
-
-    ir1 = info_ratio_annual(net1, m1)
-    ir2 = info_ratio_annual(net2, m2)
-    return min(ir1, ir2)
-
-
-for epoch in range(1, n_epochs + 1):
-    train_mae = run_train_epoch(train_loader, model, optimizer)
-
-    val_mse, val_mae = evaluate(val_loader, model)
-    best_val_mae = min(best_val_mae, val_mae)
-
-    do_eval = (epoch == 1) or (epoch % EVAL_EVERY_EPOCH == 0) or (epoch == n_epochs)
-    if not do_eval:
-        if epoch % 5 == 0:
-            print(f"Epoch {epoch:3d} | train MAE: {train_mae:.6e} | val MAE: {val_mae:.6e} | val MSE: {val_mse:.6e}")
-        continue
-
-    y_pred_val, y_true_val = get_predictions_np(val_loader, model)
-    df_val = pd.DataFrame(
-        {"date": pd.to_datetime(val_dates), "ticker": val_tickers.astype(str), "pred": y_pred_val, "ret": y_true_val}
-    )
-    cache_val = build_daily_cache(df_val)
-
-    best_score_epoch = -float("inf")
-    best_params_epoch: Optional[Tuple[int, int, int]] = None
-
-    for reb in REBALANCE_GRID:
-        for buf in BUFFER_GRID:
-            for k in TOPK_GRID:
-                _, net_s, _ = backtest_longonly_buffer_cost(
-                    cache=cache_val,
-                    k=k,
-                    rebalance_every=reb,
-                    buffer=buf,
-                    cost_bps=COST_BPS,
-                    charge_entry_cost=CHARGE_ENTRY_COST,
-                )
-                score = robust_net_alpha_ir(net_s, cache_val.mkt_daily)
-                if np.isfinite(score) and score > best_score_epoch:
-                    best_score_epoch = score
-                    best_params_epoch = (k, reb, buf)
-
-    if np.isfinite(best_score_epoch) and best_score_epoch > best_score_global:
-        best_score_global = best_score_epoch
-        best_params = best_params_epoch
-        best_state_dict = copy.deepcopy(model.state_dict())
-
-    print(
-        f"Epoch {epoch:3d} | train MAE: {train_mae:.6e} | val MAE: {val_mae:.6e} | val MSE: {val_mse:.6e} "
-        f"| best VAL robust NET alpha IR (epoch): {best_score_epoch:.4f} params(K,reb,buf)={best_params_epoch} "
-        f"| best GLOBAL: {best_score_global:.4f} params={best_params}"
-    )
-
-if best_state_dict is None or best_params is None:
-    raise RuntimeError("Selection failed: best_state_dict/best_params is None.")
-
-model.load_state_dict(best_state_dict)
-best_k, best_reb, best_buf = best_params
-
-print("\n=== SELECTION SUMMARY ===")
-print("Best val MAE (tracking only):", best_val_mae)
-print("Best GLOBAL robust Val NET alpha IR:", best_score_global)
-print("Best params (K, rebalance_every, buffer):", best_params)
-print("Cost config (selection):", f"COST_BPS={COST_BPS}, CHARGE_ENTRY_COST={CHARGE_ENTRY_COST}")
+    idx = pd.to_datetime(days)
+    return pd.Series(net_by_day, index=idx), pd.Series(mkt_by_day, index=idx), float(np.mean(to_by_day))
 
 
-# =====================================================
-# 9) Final prediction metrics
-# =====================================================
-train_mse, train_mae = evaluate(train_loader, model)
-val_mse, val_mae = evaluate(val_loader, model)
-test_mse, test_mae = evaluate(test_loader, model)
+def robust_metric_over_halves(
+    net: pd.Series,
+    mkt: pd.Series,
+    split_date: pd.Timestamp,
+    metric: str,
+) -> float:
+    """Robust metric = min(metric on H1, metric on H2)."""
+    h1_mask = net.index < split_date
+    h2_mask = ~h1_mask
 
-print("\nFinal prediction metrics:")
-print(f"Train: MSE={train_mse:.6e}, MAE={train_mae:.6e}")
-print(f"Val:   MSE={val_mse:.6e}, MAE={val_mae:.6e}")
-print(f"Test:  MSE={test_mse:.6e}, MAE={test_mae:.6e}")
+    def metric_value(x_net: np.ndarray, x_mkt: np.ndarray) -> float:
+        if metric == "net_sortino":
+            return sortino(x_net)
+        if metric == "net_sharpe":
+            return sharpe(x_net)
+        if metric == "net_alpha_ir":
+            return alpha_ir(x_net, x_mkt)
+        raise ValueError(f"Unknown metric: {metric}")
 
+    if h1_mask.sum() < 20 or h2_mask.sum() < 20:
+        # too short -> use full period
+        return metric_value(net.values, mkt.values)
 
-# =====================================================
-# 10) TEST backtest + Sortino + Year split + Fee sensitivity
-# =====================================================
-y_pred_test, y_true_test = get_predictions_np(test_loader, model)
-df_test = pd.DataFrame(
-    {"date": pd.to_datetime(test_dates), "ticker": test_tickers.astype(str), "pred": y_pred_test, "ret": y_true_test}
-)
-cache_test = build_daily_cache(df_test)
-mkt = cache_test.mkt_daily
-
-gross_sel, net_sel, to_sel = backtest_longonly_buffer_cost(
-    cache=cache_test,
-    k=best_k,
-    rebalance_every=best_reb,
-    buffer=best_buf,
-    cost_bps=COST_BPS,
-    charge_entry_cost=CHARGE_ENTRY_COST,
-)
+    m1 = metric_value(net[h1_mask].values, mkt[h1_mask].values)
+    m2 = metric_value(net[h2_mask].values, mkt[h2_mask].values)
+    return float(min(m1, m2))
 
 
-def report_block(title: str, port_gross: pd.Series, port_net: pd.Series, mkt_series: pd.Series, turnover: pd.Series):
-    a_g = alpha_series(port_gross, mkt_series)
-    a_n = alpha_series(port_net, mkt_series)
+# -----------------------------
+# Train / eval loops
+# -----------------------------
 
-    print(f"\n=== {title} ===")
-    print("Market   Sharpe:", sharpe_annual_series(mkt_series), "Sortino:", sortino_annual_series(mkt_series), "Cum:", cumulative_return(mkt_series))
-    print("GROSS    Sharpe:", sharpe_annual_series(port_gross), "Sortino:", sortino_annual_series(port_gross),
-          "Cum:", cumulative_return(port_gross), "Excess wealth:", cumulative_excess_wealth(port_gross, mkt_series))
-    print("NET      Sharpe:", sharpe_annual_series(port_net), "Sortino:", sortino_annual_series(port_net),
-          "Cum:", cumulative_return(port_net), "Excess wealth:", cumulative_excess_wealth(port_net, mkt_series))
-    print("Alpha(G) Sharpe/IR:", sharpe_annual_series(a_g), "Alpha(G) Sortino:", sortino_annual_series(a_g))
-    print("Alpha(N) Sharpe/IR:", sharpe_annual_series(a_n), "Alpha(N) Sortino:", sortino_annual_series(a_n))
-    print("Avg turnover:", float(turnover.mean()))
-
-
-report_block(
-    title=f"TEST RESULTS (Selected params K,reb,buf={best_params})",
-    port_gross=gross_sel,
-    port_net=net_sel,
-    mkt_series=mkt,
-    turnover=to_sel,
-)
+def run_train_epoch(loader: DataLoader, model: nn.Module, optim: torch.optim.Optimizer, device: torch.device) -> float:
+    model.train()
+    loss_fn = nn.L1Loss()
+    tot = 0.0
+    n = 0
+    for xb, yb in loader:
+        xb = xb.to(device)
+        yb = yb.to(device)
+        optim.zero_grad(set_to_none=True)
+        pred = model(xb)
+        loss = loss_fn(pred, yb)
+        loss.backward()
+        optim.step()
+        tot += float(loss.item()) * xb.size(0)
+        n += xb.size(0)
+    return tot / max(1, n)
 
 
-def report_by_year(title: str, gross: pd.Series, net: pd.Series, mkt_series: pd.Series, turnover: pd.Series):
-    years = sorted(set(gross.dropna().index.year))
-    print(f"\n=== {title} (by year) ===")
-    for y in years:
-        g_y = gross[gross.index.year == y]
-        n_y = net[net.index.year == y]
-        m_y = mkt_series[mkt_series.index.year == y]
-        to_y = turnover[turnover.index.year == y]
-        if len(g_y) < 30 or len(m_y) < 30:
+@torch.no_grad()
+def predict(loader: DataLoader, model: nn.Module, device: torch.device) -> np.ndarray:
+    model.eval()
+    outs: List[np.ndarray] = []
+    for xb, _ in loader:
+        xb = xb.to(device)
+        pred = model(xb).detach().cpu().numpy().reshape(-1)
+        outs.append(pred)
+    return np.concatenate(outs, axis=0)
+
+
+@torch.no_grad()
+def eval_pred_metrics(loader: DataLoader, model: nn.Module, device: torch.device) -> Tuple[float, float]:
+    model.eval()
+    mse_fn = nn.MSELoss(reduction="sum")
+    mae_fn = nn.L1Loss(reduction="sum")
+    mse_sum = 0.0
+    mae_sum = 0.0
+    n = 0
+    for xb, yb in loader:
+        xb = xb.to(device)
+        yb = yb.to(device)
+        pred = model(xb)
+        mse_sum += float(mse_fn(pred, yb).item())
+        mae_sum += float(mae_fn(pred, yb).item())
+        n += xb.size(0)
+    return mse_sum / max(1, n), mae_sum / max(1, n)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--seed", type=int, default=42)
+
+    p.add_argument("--train_batch", type=int, default=256)
+    p.add_argument("--eval_batch", type=int, default=512)
+    p.add_argument("--epochs", type=int, default=50)
+    p.add_argument("--lr", type=float, default=1e-3)
+
+    p.add_argument("--hidden", type=int, default=256)
+    p.add_argument("--depth", type=int, default=3)
+    p.add_argument("--dropout", type=float, default=0.1)
+
+    p.add_argument("--grid_K", type=str, default="5,10,20,30,40,50,75,100")
+    # NOTE: removed daily rebalance by default to avoid pathological turnover
+    p.add_argument("--grid_reb", type=str, default="5,10,20")
+    p.add_argument("--grid_buf", type=str, default="0,10,20,40")
+
+    p.add_argument("--select_metric", type=str, default="net_sortino",
+                   choices=["net_sortino", "net_sharpe", "net_alpha_ir"])
+    p.add_argument("--val_split_date", type=str, default="2023-07-01")
+    p.add_argument("--eval_every_epoch", type=int, default=5)
+
+    p.add_argument("--cost_bps", type=float, default=10.0)
+    p.add_argument("--charge_entry_cost", action="store_true")
+    p.add_argument("--charge_exit_cost", action="store_true")
+
+    # Turnover control
+    p.add_argument("--max_avg_turnover", type=float, default=0.12,
+                   help="Hard constraint on avg turnover during validation policy selection. Set <=0 to disable.")
+    p.add_argument("--turnover_penalty", type=float, default=0.0,
+                   help="Soft penalty: score = robust_metric - turnover_penalty * avg_turnover.")
+
+    args = p.parse_args()
+
+    set_global_seed(args.seed)
+
+    # Load dataset (same as previous scripts)
+    X_train = np.load("data/X_train.npy")
+    y_train = np.load("data/y_train.npy")
+    X_val = np.load("data/X_val.npy")
+    y_val = np.load("data/y_val.npy")
+    X_test = np.load("data/X_test.npy")
+    y_test = np.load("data/y_test.npy")
+
+    val_dates = np.load("data/val_dates.npy", allow_pickle=True)
+    val_tickers = np.load("data/val_tickers.npy", allow_pickle=True)
+    test_dates = np.load("data/test_dates.npy", allow_pickle=True)
+    test_tickers = np.load("data/test_tickers.npy", allow_pickle=True)
+
+    print("Shapes:")
+    print("X_train:", X_train.shape, "y_train:", y_train.shape)
+    print("X_val:  ", X_val.shape, "y_val:  ", y_val.shape)
+    print("X_test: ", X_test.shape, "y_test:", y_test.shape)
+
+    input_dim = X_train.shape[1]
+
+    # DataLoaders with deterministic shuffling
+    g = torch.Generator()
+    g.manual_seed(args.seed)
+
+    train_ds = TabularDataset(X_train, y_train)
+    val_ds = TabularDataset(X_val, y_val)
+    test_ds = TabularDataset(X_test, y_test)
+
+    train_loader = DataLoader(train_ds, batch_size=args.train_batch, shuffle=True, generator=g)
+    val_loader = DataLoader(val_ds, batch_size=args.eval_batch, shuffle=False)
+    test_loader = DataLoader(test_ds, batch_size=args.eval_batch, shuffle=False)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    model = MLP(input_dim=input_dim, hidden=args.hidden, depth=args.depth, dropout=args.dropout).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    TOPK_GRID = parse_int_list(args.grid_K)
+    REBALANCE_GRID = parse_int_list(args.grid_reb)
+    BUFFER_GRID = parse_int_list(args.grid_buf)
+
+    split_date = pd.Timestamp(args.val_split_date)
+
+    best_global = {
+        "score": -1e18,
+        "robust_metric": -1e18,
+        "avg_turnover": 1e18,
+        "policy": None,
+    }
+
+    for epoch in range(1, args.epochs + 1):
+        train_mae = run_train_epoch(train_loader, model, optimizer, device)
+
+        if epoch % args.eval_every_epoch != 0 and epoch != 1 and epoch != args.epochs:
+            # light logging only
+            if epoch % 5 == 0:
+                val_mse, val_mae = eval_pred_metrics(val_loader, model, device)
+                print(f"Epoch {epoch:>3} | train MAE: {train_mae:.6e} | val MAE: {val_mae:.6e} | val MSE: {val_mse:.6e}")
             continue
-        report_block(str(y), g_y, n_y, m_y, to_y)
 
+        # Prediction metrics
+        val_mse, val_mae = eval_pred_metrics(val_loader, model, device)
 
-report_by_year(
-    title=f"TEST RESULTS Selected params K,reb,buf={best_params}",
-    gross=gross_sel,
-    net=net_sel,
-    mkt_series=mkt,
-    turnover=to_sel,
-)
+        # Portfolio selection on validation
+        val_pred = predict(val_loader, model, device)
+        df_val = build_df(val_pred, y_val, val_dates, val_tickers)
 
+        best_epoch = {
+            "score": -1e18,
+            "robust_metric": -1e18,
+            "avg_turnover": 1e18,
+            "policy": None,
+        }
 
-def apply_cost_from_turnover(gross: pd.Series, turnover: pd.Series, cost_bps: float) -> pd.Series:
-    gross2, to2 = align_two(gross, turnover)
-    return gross2 - to2 * (cost_bps / 10000.0)
+        for K in TOPK_GRID:
+            for reb in REBALANCE_GRID:
+                for buf in BUFFER_GRID:
+                    pol = Policy(K=K, rebalance_every=reb, buffer=buf)
+                    net, mkt, avg_to = simulate_policy(
+                        df_val, pol,
+                        cost_bps=args.cost_bps,
+                        charge_entry_cost=args.charge_entry_cost,
+                        charge_exit_cost=args.charge_exit_cost,
+                    )
 
+                    rm = robust_metric_over_halves(net, mkt, split_date, args.select_metric)
 
-print("\n=== FEE SENSITIVITY (Selected params, same turnover) ===")
-for bps in [0.0, 5.0, 10.0, 20.0]:
-    net_bps = apply_cost_from_turnover(gross_sel, to_sel, bps)
-    print(
-        f"cost_bps={bps:>4.0f} | NET Sharpe={sharpe_annual_series(net_bps):.4f} "
-        f"| NET Sortino={sortino_annual_series(net_bps):.4f} "
-        f"| NET Cum={cumulative_return(net_bps):.4f} "
-        f"| Alpha IR={info_ratio_annual(net_bps, mkt):.4f}"
+                    # hard constraint
+                    if args.max_avg_turnover and args.max_avg_turnover > 0:
+                        if avg_to > args.max_avg_turnover:
+                            continue
+
+                    score = rm - (args.turnover_penalty * avg_to)
+
+                    if score > best_epoch["score"]:
+                        best_epoch.update({
+                            "score": float(score),
+                            "robust_metric": float(rm),
+                            "avg_turnover": float(avg_to),
+                            "policy": pol,
+                        })
+
+        # if everything was filtered out by turnover constraint, fall back to unconstrained best
+        if best_epoch["policy"] is None:
+            for K in TOPK_GRID:
+                for reb in REBALANCE_GRID:
+                    for buf in BUFFER_GRID:
+                        pol = Policy(K=K, rebalance_every=reb, buffer=buf)
+                        net, mkt, avg_to = simulate_policy(
+                            df_val, pol,
+                            cost_bps=args.cost_bps,
+                            charge_entry_cost=args.charge_entry_cost,
+                            charge_exit_cost=args.charge_exit_cost,
+                        )
+                        rm = robust_metric_over_halves(net, mkt, split_date, args.select_metric)
+                        score = rm - (args.turnover_penalty * avg_to)
+                        if score > best_epoch["score"]:
+                            best_epoch.update({
+                                "score": float(score),
+                                "robust_metric": float(rm),
+                                "avg_turnover": float(avg_to),
+                                "policy": pol,
+                            })
+
+        pol = best_epoch["policy"]
+        assert pol is not None
+
+        if best_epoch["score"] > best_global["score"]:
+            best_global = dict(best_epoch)
+
+        print(
+            f"Epoch {epoch:>3} | train MAE: {train_mae:.6e} | val MAE: {val_mae:.6e} | val MSE: {val_mse:.6e} | "
+            f"best VAL robust {args.select_metric}: {best_epoch['robust_metric']:.4f} "
+            f"score={best_epoch['score']:.4f} TO={best_epoch['avg_turnover']:.4f} "
+            f"params(K,reb,buf)=({pol.K}, {pol.rebalance_every}, {pol.buffer}) | "
+            f"best GLOBAL score: {best_global['score']:.4f}"
+        )
+
+    # -----------------------------
+    # Final evaluation on TEST using best_global policy
+    # -----------------------------
+    best_pol: Policy = best_global["policy"]
+    assert best_pol is not None
+
+    # Prediction metrics
+    train_mse, train_mae = eval_pred_metrics(train_loader, model, device)
+    val_mse, val_mae = eval_pred_metrics(val_loader, model, device)
+    test_mse, test_mae = eval_pred_metrics(test_loader, model, device)
+
+    print("\n=== SELECTION SUMMARY ===")
+    print(f"Selection metric: {args.select_metric} (robust=min over H1/H2)")
+    print(f"Best GLOBAL score: {best_global['score']:.6f}")
+    print(f"Best GLOBAL robust metric: {best_global['robust_metric']:.6f}")
+    print(f"Best params (K, rebalance_every, buffer): ({best_pol.K}, {best_pol.rebalance_every}, {best_pol.buffer})")
+    print(f"Cost config: COST_BPS={args.cost_bps}, entry={args.charge_entry_cost}, exit={args.charge_exit_cost}")
+    print(f"Turnover control: max_avg_turnover={args.max_avg_turnover}, penalty={args.turnover_penalty}")
+
+    print("\nFinal prediction metrics:")
+    print(f"Train: MSE={train_mse:.6e}, MAE={train_mae:.6e}")
+    print(f"Val:   MSE={val_mse:.6e}, MAE={val_mae:.6e}")
+    print(f"Test:  MSE={test_mse:.6e}, MAE={test_mae:.6e}")
+
+    # Test portfolio results
+    test_pred = predict(test_loader, model, device)
+    df_test = build_df(test_pred, y_test, test_dates, test_tickers)
+
+    net, mkt, avg_to = simulate_policy(
+        df_test, best_pol,
+        cost_bps=args.cost_bps,
+        charge_entry_cost=args.charge_entry_cost,
+        charge_exit_cost=args.charge_exit_cost,
     )
+
+    print(f"\n=== TEST RESULTS (Selected params K,reb,buf=({best_pol.K}, {best_pol.rebalance_every}, {best_pol.buffer})) ===")
+    print(f"Market   Sharpe: {sharpe(mkt.values):.6f} Sortino: {sortino(mkt.values):.6f} Cum: {(1+mkt).prod()-1:.6f}")
+    print(f"NET      Sharpe: {sharpe(net.values):.6f} Sortino: {sortino(net.values):.6f} Cum: {(1+net).prod()-1:.6f}")
+    print(f"Alpha(N) IR:     {alpha_ir(net.values, mkt.values):.6f}")
+    print(f"Avg turnover: {avg_to:.6f}")
+
+
+if __name__ == "__main__":
+    main()

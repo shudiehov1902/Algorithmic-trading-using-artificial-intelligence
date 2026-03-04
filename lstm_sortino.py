@@ -32,6 +32,25 @@ def set_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
 
+def parse_fixed_policies(s: str):
+    """Parse 'K,reb,buf;K,reb,buf;...' into list of tuples."""
+    if s is None:
+        return []
+    s = s.strip()
+    if not s:
+        return []
+    out = []
+    for part in s.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        nums = [p.strip() for p in part.split(",")]
+        if len(nums) != 3:
+            raise ValueError(f"Invalid fixed policy '{part}', expected 'K,reb,buf'")
+        out.append((int(nums[0]), int(nums[1]), int(nums[2])))
+    return out
+
+
 # --------------------------
 # Dataset: sequences per ticker
 # --------------------------
@@ -172,6 +191,7 @@ def compute_net_portfolio_returns_by_day(
     uniq_dates_sorted, _ = torch.sort(uniq_dates)
 
     prev_w_full = torch.zeros(n_tickers, device=device)
+    first_step = True
     rp_net_list = []
     rp_gross_list = []
     turnovers = []
@@ -195,6 +215,9 @@ def compute_net_portfolio_returns_by_day(
         rp_gross = (w_full[t_d] * r_d).sum()
 
         turnover = 0.5 * torch.abs(w_full - prev_w_full).sum()
+        if (not charge_entry_cost) and first_step:
+            turnover = torch.tensor(0.0, device=device)
+        first_step = False
         rp_net = rp_gross - turnover * cost
 
         rp_net_list.append(rp_net)
@@ -232,12 +255,26 @@ def alpha_ir_net(rp_net: torch.Tensor, rm: torch.Tensor, eps: float = 1e-8):
 def cum_return(rp: torch.Tensor):
     return torch.prod(1.0 + rp) - 1.0
 
+def compute_metric(rp_net: torch.Tensor, rm: torch.Tensor, select_metric: str) -> float:
+    """Compute metric on a return series (NET)."""
+    if select_metric == "net_sharpe":
+        return (rp_net.mean() / rp_net.std(unbiased=False).clamp_min(1e-8) * math.sqrt(252.0)).item()
+    if select_metric == "net_sortino":
+        downside = torch.clamp(rp_net, max=0.0)
+        dd = torch.sqrt(torch.mean(downside * downside)).clamp_min(1e-8)
+        return (rp_net.mean() / dd * math.sqrt(252.0)).item()
+    if select_metric == "alpha_ir_net":
+        return alpha_ir_net(rp_net, rm).item()
+    if select_metric == "net_cum":
+        return (torch.prod(1.0 + rp_net) - 1.0).item()
+    raise ValueError(f"Unknown select_metric: {select_metric}")
+
 
 # --------------------------
 # Evaluation: grid search (K, reb, buf) on robust Val NET Alpha IR
 # --------------------------
 @torch.no_grad()
-def eval_grid_robust_net_alpha_ir(
+def eval_grid_robust_metric(
     scores: torch.Tensor,
     rets: torch.Tensor,
     date_ids: torch.Tensor,
@@ -245,6 +282,7 @@ def eval_grid_robust_net_alpha_ir(
     n_tickers: int,
     cost_bps: float,
     charge_entry_cost: bool,
+    select_metric: str,
     grid_K,
     grid_reb,
     grid_buf,
@@ -279,6 +317,7 @@ def eval_grid_robust_net_alpha_ir(
 
         prev_hold = None
         prev_w_full = torch.zeros(n_tickers, device=device)
+        first_step = True
 
         rp_net = []
         turnovers = []
@@ -318,9 +357,9 @@ def eval_grid_robust_net_alpha_ir(
             rp_gross = (w_present * r_d).sum()
 
             turnover = 0.5 * torch.abs(w_full - prev_w_full).sum()
-            if (not charge_entry_cost) and (t_i == 0):
+            if (not charge_entry_cost) and first_step:
                 turnover = torch.tensor(0.0, device=device)
-
+            first_step = False
             rp_net_t = rp_gross - turnover * cost
 
             rp_net.append(rp_net_t)
@@ -331,14 +370,14 @@ def eval_grid_robust_net_alpha_ir(
         rp_net = torch.stack(rp_net)
 
         mid = T // 2
-        ir1 = alpha_ir_net(rp_net[:mid], rm[:mid]).item()
-        ir2 = alpha_ir_net(rp_net[mid:], rm[mid:]).item()
-        robust = min(ir1, ir2)
+        metric1 = compute_metric(rp_net[:mid], rm[:mid], select_metric)
+        metric2 = compute_metric(rp_net[mid:], rm[mid:], select_metric)
+        robust = min(metric1, metric2)
 
         out = {
             "robust": robust,
-            "ir1": ir1,
-            "ir2": ir2,
+            "metric1": metric1,
+            "metric2": metric2,
             "rm_cum": (torch.prod(1.0 + rm) - 1.0).item(),
             "rp_net_cum": (torch.prod(1.0 + rp_net) - 1.0).item(),
             "avg_turnover": torch.stack(turnovers).mean().item(),
@@ -390,6 +429,7 @@ def eval_selected_params_on_test(
     cost = cost_bps / 10000.0
     prev_hold = None
     prev_w_full = torch.zeros(n_tickers, device=device)
+    first_step = True
 
     rp_net = []
     turnovers = []
@@ -423,9 +463,9 @@ def eval_selected_params_on_test(
 
         rp_gross = (w_full[t_d] * r_d).sum()
         turnover = 0.5 * torch.abs(w_full - prev_w_full).sum()
-        if (not charge_entry_cost) and (t_i == 0):
+        if (not charge_entry_cost) and first_step:
             turnover = torch.tensor(0.0, device=device)
-
+        first_step = False
         rp_net_t = rp_gross - turnover * cost
 
         rp_net.append(rp_net_t)
@@ -437,7 +477,8 @@ def eval_selected_params_on_test(
 
     net_sh = (rp_net.mean() / rp_net.std(unbiased=False).clamp_min(1e-8) * math.sqrt(252.0)).item()
     downside = torch.clamp(rp_net, max=0.0)
-    net_so = (rp_net.mean() / downside.std(unbiased=False).clamp_min(1e-8) * math.sqrt(252.0)).item()
+    dd = torch.sqrt(torch.mean(downside * downside)).clamp_min(1e-8)
+    net_so = (rp_net.mean() / dd * math.sqrt(252.0)).item()
 
     ir = alpha_ir_net(rp_net, rm).item()
     net_cum = (torch.prod(1.0 + rp_net) - 1.0).item()
@@ -492,6 +533,13 @@ def main():
     parser.add_argument("--grid_reb", type=str, default="5,10")
     parser.add_argument("--grid_buf", type=str, default="0,10,20,40")
 
+    parser.add_argument("--select_metric", type=str, default="net_sortino", choices=["net_sortino","net_sharpe","alpha_ir_net","net_cum"],
+                        help="Metric for selecting (K,reb,buf) on validation (robust=min over 2 halves).")
+    parser.add_argument("--fixed_policies", type=str, default="5,5,10;5,10,0;20,10,10;50,10,40",
+                        help="Semicolon-separated fixed (K,reb,buf) policies to report on TEST.")
+    parser.add_argument("--shuffle_dates", action="store_true",
+                        help="Shuffle dates in training sampler (NOT recommended with turnover/costs).")
+
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_path", type=str, default="data/lstm_sortino.pt")
     args = parser.parse_args()
@@ -529,7 +577,7 @@ def main():
     val_ds = SequenceDataset(X_val, y_val, d_val, t_val, seq_len=args.seq_len, require_consecutive=True)
     test_ds = SequenceDataset(X_test, y_test, d_test, t_test, seq_len=args.seq_len, require_consecutive=True)
 
-    train_sampler = MultiDateBatchSampler(train_ds.sample_date, days_per_batch=args.days_per_batch, shuffle_dates=True, drop_last=True)
+    train_sampler = MultiDateBatchSampler(train_ds.sample_date, days_per_batch=args.days_per_batch, shuffle_dates=args.shuffle_dates, drop_last=True)
     train_loader = DataLoader(train_ds, batch_sampler=train_sampler, num_workers=0)
 
     val_loader = DataLoader(val_ds, batch_size=8192, shuffle=False, num_workers=0)
@@ -618,7 +666,7 @@ def main():
         val_mse = torch.mean((val_scores - val_y) ** 2).item()
         val_mae = torch.mean(torch.abs(val_scores - val_y)).item()
 
-        best_epoch_val, best_epoch_params, _ = eval_grid_robust_net_alpha_ir(
+        best_epoch_val, best_epoch_params, _ = eval_grid_robust_metric(
             scores=val_scores,
             rets=val_y,
             date_ids=val_d,
@@ -626,6 +674,7 @@ def main():
             n_tickers=n_tickers,
             cost_bps=args.cost_bps,
             charge_entry_cost=args.charge_entry_cost,
+            select_metric=args.select_metric,
             grid_K=grid_K,
             grid_reb=grid_reb,
             grid_buf=grid_buf,
@@ -640,12 +689,12 @@ def main():
             print(
                 f"Epoch {epoch:>3d} | w_obj={w_obj:0.2f} | train {obj_name}-loss: {np.mean(losses): .6f} "
                 f"| mse_reg: {np.mean(mse_regs): .6f} | val MSE: {val_mse: .6e} | val MAE: {val_mae: .6e} "
-                f"| best VAL robust NET Alpha IR (epoch): {best_epoch_val: .4f} params(K,reb,buf)={best_epoch_params} "
+                f"| best VAL robust metric (epoch): {best_epoch_val: .4f} params(K,reb,buf)={best_epoch_params} "
                 f"| best GLOBAL: {best_global: .4f} params={best_global_params}"
             )
 
     print("\n=== SELECTION SUMMARY ===")
-    print("Best GLOBAL robust Val NET Alpha IR:", best_global)
+    print("Best GLOBAL robust Val metric:", best_global)
     print("Best params (K, rebalance_every, buffer):", best_global_params)
     print(f"Cost config: COST_BPS={args.cost_bps}, CHARGE_ENTRY_COST={args.charge_entry_cost}")
 
@@ -679,23 +728,45 @@ def main():
             else:
                 print(f"{k}: {v}")
 
-    os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "params": {
-                "seq_len": args.seq_len,
-                "hidden": args.hidden,
-                "layers": args.layers,
-                "dropout": args.dropout,
-                "objective": args.objective,
-                "best_params": best_global_params,
-                "best_val_robust_net_alpha_ir": best_global,
+    # fixed policy evaluation (optional)
+    fixed_pols = parse_fixed_policies(args.fixed_policies) if hasattr(args, "fixed_policies") else []
+    if fixed_pols:
+        print("\n=== TEST RESULTS (FIXED POLICIES) ===")
+        for pol in fixed_pols:
+            res_pol = eval_selected_params_on_test(
+                scores=test_scores,
+                rets=test_y,
+                date_ids=test_d,
+                ticker_ids=test_t,
+                n_tickers=n_tickers,
+                cost_bps=args.cost_bps,
+                charge_entry_cost=args.charge_entry_cost,
+                params=pol,
+            )
+            print(f"\nPolicy (K,reb,buf)={tuple(pol)}")
+            for kk, vv in res_pol.items():
+                if isinstance(vv, float):
+                    print(f"{kk}: {vv:.6f}")
+                else:
+                    print(f"{kk}: {vv}")
+
+        os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
+        torch.save(
+            {
+                "model_state": model.state_dict(),
+                "params": {
+                    "seq_len": args.seq_len,
+                    "hidden": args.hidden,
+                    "layers": args.layers,
+                    "dropout": args.dropout,
+                    "objective": args.objective,
+                    "best_params": best_global_params,
+                    "best_val_robust_net_alpha_ir": best_global,
+                },
             },
-        },
-        args.save_path,
-    )
-    print(f"\nSaved: {args.save_path}")
+            args.save_path,
+        )
+        print(f"\nSaved: {args.save_path}")
 
 
 if __name__ == "__main__":

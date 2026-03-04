@@ -51,6 +51,25 @@ def mae_np(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.abs(a - b)))
 
 
+
+def parse_fixed_policies(s: str):
+    """Parse 'K,reb,buf;K,reb,buf;...' into list[StrategyParams]."""
+    if s is None:
+        return []
+    s = s.strip()
+    if not s:
+        return []
+    out = []
+    for part in s.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        nums = [p.strip() for p in part.split(",")]
+        if len(nums) != 3:
+            raise ValueError(f"Invalid fixed policy '{part}', expected 'K,reb,buf'")
+        out.append(StrategyParams(int(nums[0]), int(nums[1]), int(nums[2])))
+    return out
+
 # ----------------------------
 # Strategy params
 # ----------------------------
@@ -417,7 +436,20 @@ def backtest_topk_net(
         "ExcessWealth_N": float(cum_return(rp_net) - cum_return(rm)),
     }
 
-def robust_val_score_alpha_ir(
+
+
+def pick_val_metric(res: Dict[str, float], select_metric: str) -> float:
+    if select_metric == "net_sortino":
+        return float(res["NET_Sortino"])
+    if select_metric == "net_sharpe":
+        return float(res["NET_Sharpe"])
+    if select_metric == "alpha_ir_net":
+        return float(res["AlphaIR_N"])
+    if select_metric == "net_cum":
+        return float(res["NET_Cum"])
+    raise ValueError(f"Unknown select_metric: {select_metric}")
+
+def robust_val_score(
     y_true: np.ndarray,
     scores: np.ndarray,
     ticker_id: np.ndarray,
@@ -426,24 +458,21 @@ def robust_val_score_alpha_ir(
     params: StrategyParams,
     cost_bps: float,
     charge_entry_cost: bool,
+    select_metric: str,
 ) -> float:
     unique_days = np.unique(date_id)
     unique_days.sort()
     if unique_days.size < 10:
         res = backtest_topk_net(y_true, scores, ticker_id, date_id, U, params, cost_bps, charge_entry_cost)
-        return float(res["AlphaIR_N"])
-
+        return pick_val_metric(res, select_metric)
     mid = unique_days.size // 2
-    d1 = unique_days[:mid]
-    d2 = unique_days[mid:]
-
-    m1 = np.isin(date_id, d1)
-    m2 = np.isin(date_id, d2)
-
+    d1 = set(unique_days[:mid].tolist())
+    d2 = set(unique_days[mid:].tolist())
+    m1 = np.isin(date_id, list(d1))
+    m2 = np.isin(date_id, list(d2))
     res1 = backtest_topk_net(y_true[m1], scores[m1], ticker_id[m1], date_id[m1], U, params, cost_bps, charge_entry_cost)
     res2 = backtest_topk_net(y_true[m2], scores[m2], ticker_id[m2], date_id[m2], U, params, cost_bps, charge_entry_cost)
-
-    return float(min(res1["AlphaIR_N"], res2["AlphaIR_N"]))
+    return float(min(pick_val_metric(res1, select_metric), pick_val_metric(res2, select_metric)))
 
 
 # ----------------------------
@@ -468,6 +497,21 @@ def main():
     ap.add_argument("--reb_list", type=str, default="5,10")
     ap.add_argument("--buf_list", type=str, default="0,10,20,40")
     ap.add_argument("--save_path", type=str, default="data/mlp_sortino.pt")
+    ap.add_argument(
+        "--fixed_policies",
+        type=str,
+        default="",
+        help="Optional: evaluate these fixed policies on test, format: \"K,reb,buf;K,reb,buf\".",
+    )
+
+
+    ap.add_argument(
+    "--select_metric",
+    type=str,
+    default="net_sortino",
+    choices=["net_sortino", "net_sharpe", "alpha_ir_net", "net_cum"],
+    help="Metric used to select (K, reb, buf) on validation (robust = min over two halves)."
+)
 
     args = ap.parse_args()
 
@@ -558,7 +602,7 @@ def main():
             for reb in reb_list:
                 for buf in buf_list:
                     params = StrategyParams(K=K, rebalance_every=reb, buffer=buf)
-                    score = robust_val_score_alpha_ir(
+                    score = robust_val_score(
                         y_true=y_val,
                         scores=pred_val,
                         ticker_id=tid_val,
@@ -567,6 +611,7 @@ def main():
                         params=params,
                         cost_bps=args.cost_bps,
                         charge_entry_cost=args.charge_entry_cost,
+                        select_metric=args.select_metric,
                     )
                     if score > best_epoch_score:
                         best_epoch_score = score
@@ -597,7 +642,8 @@ def main():
         pred_test = model(Xt).detach().cpu().numpy()
 
     print("\n=== SELECTION SUMMARY ===")
-    print(f"Best GLOBAL robust Val NET Alpha IR: {best_global}")
+    print(f"Selection metric: {args.select_metric} (robust=min over two val halves)")
+    print(f"Best GLOBAL robust Val metric: {best_global}")
     print(f"Best params (K, rebalance_every, buffer): ({best_params.K}, {best_params.rebalance_every}, {best_params.buffer})")
     print(f"Cost config: COST_BPS={args.cost_bps}, CHARGE_ENTRY_COST={args.charge_entry_cost}")
 
@@ -630,6 +676,29 @@ def main():
     print(f"Excess wealth (NET): {res['ExcessWealth_N']:.6f}")
     print(f"Avg turnover: {res['AvgTurnover']:.6f}")
     print(f"T (days): {int(res['T'])}")
+
+    fixed_pols = parse_fixed_policies(args.fixed_policies) if getattr(args, "fixed_policies", "") else []
+    if fixed_pols:
+        print("\n=== TEST RESULTS (FIXED POLICIES) ===")
+        for fp in fixed_pols:
+            r = backtest_topk_net(
+                y_true=y_test,
+                scores=pred_test,
+                ticker_id=tid_test,
+                date_id=did_test,
+                U=U,
+                params=fp,
+                cost_bps=args.cost_bps,
+                charge_entry_cost=args.charge_entry_cost,
+            )
+            print(f"\n=== Policy K,reb,buf=({fp.K},{fp.rebalance_every},{fp.buffer}) ===")
+            print(f"NET Sharpe: {r['NET_Sharpe']:.6f}")
+            print(f"NET Sortino: {r['NET_Sortino']:.6f}")
+            print(f"Alpha IR (NET): {r['AlphaIR_N']:.6f}")
+            print(f"NET Cum: {r['NET_Cum']:.6f}")
+            print(f"Excess wealth (NET): {r['ExcessWealth_N']:.6f}")
+            print(f"Avg turnover: {r['AvgTurnover']:.6f}")
+
 
     os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
     torch.save(

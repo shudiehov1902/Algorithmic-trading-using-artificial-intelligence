@@ -8,6 +8,16 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
 import numpy as np
+
+def set_seed(seed: int) -> None:
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -445,24 +455,7 @@ def backtest_topk_net(
     return out
 
 
-
-
-def pick_val_metric(res: Dict[str, float], select_metric: str) -> float:
-    """
-    Map a backtest result dict (from backtest_topk_net) to a scalar metric for selection.
-    Keys in res: NET_Sharpe, NET_Sortino, NET_Cum, AlphaIR_N (etc).
-    """
-    if select_metric == "net_sortino":
-        return float(res["NET_Sortino"])
-    if select_metric == "net_sharpe":
-        return float(res["NET_Sharpe"])
-    if select_metric == "alpha_ir_net":
-        return float(res["AlphaIR_N"])
-    if select_metric == "net_cum":
-        return float(res["NET_Cum"])
-    raise ValueError(f"Unknown select_metric: {select_metric}")
-
-def robust_val_score(
+def robust_val_score_alpha_ir(
     y_true: np.ndarray,
     scores: np.ndarray,
     ticker_id: np.ndarray,
@@ -471,17 +464,17 @@ def robust_val_score(
     params: StrategyParams,
     cost_bps: float,
     charge_entry_cost: bool,
-    select_metric: str,
 ) -> float:
     """
     Split validation period into two halves by date order.
-    Score = min(metric_H1, metric_H2) on NET performance.
+    Score = min(IR_H1, IR_H2) on NET alpha.
     """
     unique_days = np.unique(date_id)
     unique_days.sort()
     if unique_days.size < 10:
+        # too short, just compute on all
         res = backtest_topk_net(y_true, scores, ticker_id, date_id, U, params, cost_bps, charge_entry_cost)
-        return pick_val_metric(res, select_metric)
+        return float(res["AlphaIR_N"])
 
     mid = unique_days.size // 2
     d1 = set(unique_days[:mid].tolist())
@@ -493,7 +486,7 @@ def robust_val_score(
     res1 = backtest_topk_net(y_true[m1], scores[m1], ticker_id[m1], date_id[m1], U, params, cost_bps, charge_entry_cost)
     res2 = backtest_topk_net(y_true[m2], scores[m2], ticker_id[m2], date_id[m2], U, params, cost_bps, charge_entry_cost)
 
-    return float(min(pick_val_metric(res1, select_metric), pick_val_metric(res2, select_metric)))
+    return float(min(res1["AlphaIR_N"], res2["AlphaIR_N"]))
 
 
 # ----------------------------
@@ -510,7 +503,7 @@ def main():
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--mse_reg_lambda", type=float, default=0.10, help="Regularize Sharpe-loss with MSE to keep preds stable.")
     ap.add_argument("--cost_bps", type=float, default=10.0)
-    ap.add_argument("--charge_entry_cost", action="store_true", default=True)
+    ap.add_argument("--charge_entry_cost", action="store_true", default=False)
     ap.add_argument("--max_days_per_epoch", type=int, default=None, help="Optional: limit #days per epoch for speed.")
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
 
@@ -518,22 +511,27 @@ def main():
     ap.add_argument("--K_list", type=str, default="5,10,20,40,50")
     ap.add_argument("--reb_list", type=str, default="5,10")
     ap.add_argument("--buf_list", type=str, default="0,10,20,40")
+    # Unified grid aliases (preferred)
+    ap.add_argument("--grid_K", type=str, default=None, help="Alias for --K_list, e.g. '5,10,20'")
+    ap.add_argument("--grid_reb", type=str, default=None, help="Alias for --reb_list, e.g. '5,10,20'")
+    ap.add_argument("--grid_buf", type=str, default=None, help="Alias for --buf_list, e.g. '0,10,20,40'")
+    ap.add_argument("--max_avg_turnover", type=float, default=float("inf"),
+                    help="Skip candidate policies with AvgTurnover > this threshold during selection.")
+    ap.add_argument("--turnover_penalty", type=float, default=0.0,
+                    help="Optional penalty for turnover above threshold: score = metric - penalty*max(0,TO-th).")
+    ap.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility.")
     ap.add_argument("--save_path", type=str, default="data/mlp_sharpe.pt")
-    ap.add_argument(
-        "--select_metric",
-        type=str,
-        default="net_sortino",
-        choices=["net_sortino", "net_sharpe", "alpha_ir_net", "net_cum"],
-        help="Metric used to select (K, reb, buf) on validation (robust=min over two halves).",
-    )
-    ap.add_argument(
-        "--fixed_policies",
-        type=str,
-        default="5,5,10;5,10,0;50,10,40",
-        help="Semicolon-separated list of fixed (K,reb,buf) to also report on TEST.",
-    )
 
     args = ap.parse_args()
+    # Apply grid aliases if provided
+    if args.grid_K is not None:
+        args.K_list = args.grid_K
+    if args.grid_reb is not None:
+        args.reb_list = args.grid_reb
+    if args.grid_buf is not None:
+        args.buf_list = args.grid_buf
+
+    set_seed(args.seed)
 
     device = torch.device(args.device)
     print(f"Using device: {device}")
@@ -634,20 +632,39 @@ def main():
             for reb in reb_list:
                 for buf in buf_list:
                     params = StrategyParams(K=K, rebalance_every=reb, buffer=buf)
-                    score = robust_val_score(
-                        y_true=y_val_np,
-                        scores=scores_val,
-                        ticker_id=tid_val_np,
-                        date_id=did_val_np,
-                        U=U,
-                        params=params,
-                        cost_bps=args.cost_bps,
-                        charge_entry_cost=args.charge_entry_cost,
-                        select_metric=args.select_metric,
-                    )
-                    if score > best_epoch_score:
-                        best_epoch_score = score
-                        best_epoch_params = params
+                    score_metric = robust_val_score_alpha_ir(
+                y_val=y_val,
+                scores_val=scores_val,
+                ticker_id_val=ticker_id_val,
+                date_id_val=date_id_val,
+                params=params,
+                cost_bps=args.cost_bps,
+                charge_entry_cost=args.charge_entry_cost,
+                charge_exit_cost=args.charge_exit_cost,
+            )
+
+            out_full = backtest_topk_net(
+                y_true=y_val,
+                scores=scores_val,
+                ticker_id=ticker_id_val,
+                date_id=date_id_val,
+                K=params.K,
+                rebalance_every=params.reb,
+                buffer=params.buf,
+                cost_bps=args.cost_bps,
+                charge_entry_cost=args.charge_entry_cost,
+                charge_exit_cost=args.charge_exit_cost,
+            )
+            to_full = float(out_full["AvgTurnover"])
+            if to_full > args.max_avg_turnover:
+                continue
+
+            score = float(score_metric) - args.turnover_penalty * max(0.0, to_full - args.max_avg_turnover)
+
+            if score > best_epoch_score:
+                best_epoch_score = score
+                best_epoch_params = params
+                best_epoch_turnover = to_full
 
         # update global best
         if best_epoch_score > best_global_score:
@@ -659,15 +676,14 @@ def main():
             print(
                 f"Epoch {epoch:3d} | train Sharpe-loss: {loss_sh: .6f} | mse_reg: {mse_reg: .6f} "
                 f"| val MSE: {val_mse: .6e} | val MAE: {val_mae: .6e} "
-                f"| best VAL robust metric (epoch): {best_epoch_score: .4f} "
+                f"| best VAL robust NET Alpha IR (epoch): {best_epoch_score: .4f} "
                 f"params(K,reb,buf)=({best_epoch_params.K},{best_epoch_params.rebalance_every},{best_epoch_params.buffer}) "
                 f"| best GLOBAL: {best_global_score: .4f} "
                 f"params=({best_global_params.K},{best_global_params.rebalance_every},{best_global_params.buffer})"
             )
 
     print("\n=== SELECTION SUMMARY ===")
-    print(f"Selection metric: {args.select_metric} (robust=min over two val halves)")
-    print(f"Best GLOBAL robust Val metric: {best_global_score}")
+    print(f"Best GLOBAL robust Val NET Alpha IR: {best_global_score}")
     print(f"Best params (K, rebalance_every, buffer): ({best_global_params.K}, {best_global_params.rebalance_every}, {best_global_params.buffer})")
     print(f"Cost config: COST_BPS={args.cost_bps}, CHARGE_ENTRY_COST={args.charge_entry_cost}")
 
@@ -706,39 +722,6 @@ def main():
     print(f"Excess wealth (NET): {res_test['ExcessWealth_N']:.6f}")
     print(f"Avg turnover: {res_test['AvgTurnover']:.6f}")
     print(f"T (days): {int(res_test['T'])}")
-
-    # Additional reporting: fixed portfolio policies for fair comparisons
-    def _parse_fixed_policies(s: str):
-        out = []
-        for part in s.split(';'):
-            part = part.strip()
-            if not part:
-                continue
-            K, reb, buf = [int(x) for x in part.split(',')]
-            out.append(StrategyParams(K=K, rebalance_every=reb, buffer=buf))
-        return out
-
-    fixed_list = _parse_fixed_policies(args.fixed_policies)
-    if fixed_list:
-        print("\n=== TEST RESULTS (FIXED POLICIES) ===")
-        for p in fixed_list:
-            bt = backtest_topk_net(
-                y_true=y_test.astype(np.float64),
-                scores=scores_test,
-                ticker_id=tid_test.astype(np.int64),
-                date_id=did_test.astype(np.int64),
-                U=U,
-                params=p,
-                cost_bps=args.cost_bps,
-                charge_entry_cost=args.charge_entry_cost,
-            )
-            print(f"\nPolicy (K,reb,buf)=({p.K},{p.rebalance_every},{p.buffer})")
-            print(f"NET Sharpe: {bt['NET_Sharpe']:.6f}")
-            print(f"NET Sortino: {bt['NET_Sortino']:.6f}")
-            print(f"Alpha IR (NET): {bt['AlphaIR_N']:.6f}")
-            print(f"NET Cum: {bt['NET_Cum']:.6f}")
-            print(f"Excess wealth (NET): {bt['ExcessWealth_N']:.6f}")
-            print(f"Avg turnover: {bt['AvgTurnover']:.6f}")
 
     # Save model
     torch.save(
